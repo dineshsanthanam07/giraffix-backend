@@ -1,7 +1,7 @@
 package com.giraffix;
 
 
-import com.giraffix.User.UserService;
+import com.giraffix.user.service.UserService;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;

@@ -1,7 +1,8 @@
-package com.giraffix.brand;
+package com.giraffix.brand.controller;
 
 
 
+import com.giraffix.brand.service.BrandService;
 import com.giraffix.brand.dto.*;
 
 import jakarta.validation.Valid;

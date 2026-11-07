@@ -3,7 +3,7 @@ package com.giraffix.brand.dto;
 
 
 
-import com.giraffix.brand.Brand;
+import com.giraffix.brand.entity.Brand;
 
 import java.time.Instant;
 import java.util.UUID;

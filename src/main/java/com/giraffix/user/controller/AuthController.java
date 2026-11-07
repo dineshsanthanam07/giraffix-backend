@@ -1,5 +1,7 @@
-package com.giraffix.User;
+package com.giraffix.user.controller;
 
+import com.giraffix.user.dto.UserResponse;
+import com.giraffix.user.service.UserService;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.web.bind.annotation.GetMapping;

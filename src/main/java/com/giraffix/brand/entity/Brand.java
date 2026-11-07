@@ -1,8 +1,8 @@
-package com.giraffix.brand;
+package com.giraffix.brand.entity;
 
 
 
-import com.giraffix.User.User;
+import com.giraffix.user.entity.User;
 import jakarta.persistence.*;
 
 import java.time.Instant;

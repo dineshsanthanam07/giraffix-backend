@@ -1,4 +1,4 @@
-package com.giraffix.User;
+package com.giraffix.user.entity;
 
 
 import jakarta.persistence.*;

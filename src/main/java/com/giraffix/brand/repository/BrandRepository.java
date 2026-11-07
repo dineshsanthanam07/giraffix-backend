@@ -1,8 +1,9 @@
-package com.giraffix.brand;
+package com.giraffix.brand.repository;
 
 
 
 
+import com.giraffix.brand.entity.Brand;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;

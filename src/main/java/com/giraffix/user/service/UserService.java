@@ -1,5 +1,7 @@
-package com.giraffix.User;
+package com.giraffix.user.service;
 
+import com.giraffix.user.entity.User;
+import com.giraffix.user.repository.UserRepository;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;

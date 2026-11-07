@@ -1,5 +1,7 @@
-package com.giraffix.User;
+package com.giraffix.user.dto;
 
+
+import com.giraffix.user.entity.User;
 
 import java.util.UUID;
 

@@ -1,13 +1,14 @@
-package com.giraffix.brand;
+package com.giraffix.brand.service;
 
 
 
-import com.giraffix.User.User;
-import com.giraffix.User.UserService;
+import com.giraffix.user.entity.User;
+import com.giraffix.user.service.UserService;
+import com.giraffix.brand.repository.BrandRepository;
 import com.giraffix.brand.dto.*;
 
 
-
+import com.giraffix.brand.entity.Brand;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
