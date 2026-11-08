@@ -45,5 +45,15 @@ public class UserService {
                         new IllegalStateException(
                                 "Giraffix user account not found"));
     }
+
+    @Transactional
+    public void completeOnboarding(User user) {
+
+        if (!user.isOnboardingCompleted()) {
+            user.setOnboardingCompleted(true);
+            userRepository.save(user);
+        }
+    }
+
 }
 

@@ -45,8 +45,13 @@ public class BrandService {
         brand.setTargetAudience(request.targetAudience());
         brand.setPrimaryColor(request.primaryColor());
         brand.setSecondaryColor(request.secondaryColor());
+        // Save brand first
+        Brand savedBrand = brandRepository.save(brand);
 
-        return BrandResponse.from(brandRepository.save(brand));
+        // Mark onboarding complete
+        userService.completeOnboarding(user);
+
+        return BrandResponse.from(savedBrand);
     }
 
     @Transactional(readOnly = true)
@@ -55,7 +60,7 @@ public class BrandService {
         User user = userService.getUserByGoogleId(googleId);
 
         return brandRepository
-                .findAllByOwner_IdOrderByCreatedAtDesc(user.getId())
+                .findAllByCreatedBy_IdOrderByCreatedAtDesc(user.getId())
                 .stream()
                 .map(BrandResponse::from)
                 .toList();
@@ -112,7 +117,7 @@ public class BrandService {
 
     private Brand findOwnedBrand(UUID brandId, UUID userId) {
         return brandRepository
-                .findByIdAndOwner_Id(brandId, userId)
+                .findByIdAndCreatedBy_Id(brandId, userId)
                 .orElseThrow(() ->
                         new ResponseStatusException(
                                 HttpStatus.NOT_FOUND,

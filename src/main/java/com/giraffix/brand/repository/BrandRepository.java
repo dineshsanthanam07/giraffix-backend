@@ -13,11 +13,11 @@ import java.util.UUID;
 public interface BrandRepository
         extends JpaRepository<Brand, UUID> {
 
-    List<Brand> findAllByOwner_IdOrderByCreatedAtDesc(
+    List<Brand> findAllByCreatedBy_IdOrderByCreatedAtDesc(
             UUID userId
     );
 
-    Optional<Brand> findByIdAndOwner_Id(
+    Optional<Brand> findByIdAndCreatedBy_Id(
             UUID brandId,
             UUID userId
     );
