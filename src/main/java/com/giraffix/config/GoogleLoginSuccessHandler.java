@@ -1,4 +1,4 @@
-package com.giraffix;
+package com.giraffix.config;
 
 
 import com.giraffix.user.service.UserService;

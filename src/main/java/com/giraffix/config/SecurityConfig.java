@@ -1,6 +1,5 @@
 package com.giraffix.config;
 
-import com.giraffix.GoogleLoginSuccessHandler;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpStatus;

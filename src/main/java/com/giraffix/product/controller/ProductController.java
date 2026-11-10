@@ -1,6 +1,9 @@
-package com.giraffix.product;
+package com.giraffix.product.controller;
 
 
+import com.giraffix.product.service.ProductService;
+import com.giraffix.product.dto.ProductResponse;
+import com.giraffix.product.entity.Product;
 import jakarta.validation.Valid;
 
 import org.springframework.http.HttpStatus;
@@ -26,7 +29,7 @@ public class ProductController {
     public ProductResponse create(
             @AuthenticationPrincipal OidcUser user,
             @PathVariable UUID brandId,
-            @Valid @RequestBody ProductRequest request) {
+            @Valid @RequestBody Product.ProductRequest request) {
 
         return productService.createProduct(
                 user.getSubject(), brandId, request
@@ -57,7 +60,7 @@ public class ProductController {
     public ProductResponse update(
             @AuthenticationPrincipal OidcUser user,
             @PathVariable UUID productId,
-            @Valid @RequestBody ProductRequest request) {
+            @Valid @RequestBody Product.ProductRequest request) {
 
         return productService.updateProduct(
                 user.getSubject(), productId, request

@@ -1,5 +1,6 @@
-package com.giraffix.product;
+package com.giraffix.product.repository;
 
+import com.giraffix.product.entity.Product;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;

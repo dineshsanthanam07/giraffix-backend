@@ -1,8 +1,11 @@
-package com.giraffix.product;
+package com.giraffix.product.service;
 
 
 import com.giraffix.brand.entity.Brand;
 import com.giraffix.brand.repository.BrandRepository;
+import com.giraffix.product.dto.ProductResponse;
+import com.giraffix.product.entity.Product;
+import com.giraffix.product.repository.ProductRepository;
 import com.giraffix.user.entity.User;
 import com.giraffix.user.service.UserService;
 
@@ -35,7 +38,7 @@ public class ProductService {
     public ProductResponse createProduct(
             String googleId,
             UUID brandId,
-            ProductRequest request) {
+            Product.ProductRequest request) {
 
         User user = userService.getUserByGoogleId(googleId);
 
@@ -88,7 +91,7 @@ public class ProductService {
     public ProductResponse updateProduct(
             String googleId,
             UUID productId,
-            ProductRequest request) {
+            Product.ProductRequest request) {
 
         User user = userService.getUserByGoogleId(googleId);
         Product product = findOwnedProduct(

@@ -1,6 +1,8 @@
-package com.giraffix.product;
+package com.giraffix.product.dto;
 
 
+
+import com.giraffix.product.entity.Product;
 
 import java.time.Instant;
 import java.util.UUID;
