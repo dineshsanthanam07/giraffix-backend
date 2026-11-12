@@ -4,11 +4,12 @@ package com.giraffix.product.entity;
 
 import com.giraffix.brand.entity.Brand;
 import jakarta.persistence.*;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
+
 
 import java.time.Instant;
 import java.util.UUID;
+import java.util.List;
+import java.util.ArrayList;
 
 @Entity
 @Table(name = "products", indexes = {
@@ -42,6 +43,10 @@ public class Product {
     // New: Product image URL
     @Column(name = "image_url", columnDefinition = "TEXT")
     private String imageUrl;
+
+    @OneToMany(mappedBy = "product", cascade = CascadeType.ALL, orphanRemoval = true)
+    @OrderBy("position ASC")
+    private List<ProductImage> images = new ArrayList<>();
 
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
@@ -99,23 +104,15 @@ public class Product {
         this.imageUrl = imageUrl;
     }
 
+    public List<ProductImage> getImages() { return images; }
+
+    public void addImage(String filename, String mediaType, long sizeBytes, String url) {
+        images.add(new ProductImage(this, filename, mediaType, images.size(), sizeBytes, url));
+        updatedAt = Instant.now();
+    }
+
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
 
-    public static record ProductRequest(
 
-            @NotBlank @Size(max = 150)
-            String name,
-
-            @NotBlank @Size(max = 100)
-            String category,
-
-            String description,
-            String keyFeatures,
-
-            @Size(max = 255)
-            String targetAudience,
-            @NotBlank
-            String imageUrl
-    ) {}
 }

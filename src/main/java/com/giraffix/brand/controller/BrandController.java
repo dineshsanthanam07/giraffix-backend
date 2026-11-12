@@ -4,6 +4,8 @@ package com.giraffix.brand.controller;
 
 import com.giraffix.brand.service.BrandService;
 import com.giraffix.brand.dto.*;
+import com.giraffix.validation.Create;
+import org.springframework.validation.annotation.Validated;
 
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -28,7 +30,7 @@ public class BrandController {
     @ResponseStatus(HttpStatus.CREATED)
     public BrandResponse create(
             @AuthenticationPrincipal OidcUser user,
-            @Valid @RequestBody BrandRequest request) {
+            @Validated(Create.class) @RequestBody BrandRequest request) {
 
         return brandService.createBrand(
                 user.getSubject(), request

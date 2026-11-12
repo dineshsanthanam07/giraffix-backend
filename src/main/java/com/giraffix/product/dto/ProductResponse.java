@@ -6,6 +6,7 @@ import com.giraffix.product.entity.Product;
 
 import java.time.Instant;
 import java.util.UUID;
+import java.util.List;
 
 public record ProductResponse(
         UUID id,
@@ -16,6 +17,7 @@ public record ProductResponse(
         String keyFeatures,
         String targetAudience,
         String imageUrl,
+        List<ProductImageResponse> images,
         Instant createdAt,
         Instant updatedAt
 ) {
@@ -29,6 +31,7 @@ public record ProductResponse(
                 product.getKeyFeatures(),
                 product.getTargetAudience(),
                 product.getImageUrl(),
+                product.getImages().stream().map(ProductImageResponse::from).toList(),
                 product.getCreatedAt(),
                 product.getUpdatedAt()
         );
