@@ -26,7 +26,7 @@ public class BrandController {
         this.brandService = brandService;
     }
 
-    @PostMapping
+    @PostMapping(consumes = org.springframework.http.MediaType.APPLICATION_JSON_VALUE)
     @ResponseStatus(HttpStatus.CREATED)
     public BrandResponse create(
             @AuthenticationPrincipal OidcUser user,
@@ -54,7 +54,7 @@ public class BrandController {
         );
     }
 
-    @PatchMapping("/{brandId}")
+    @PatchMapping(value = "/{brandId}", consumes = org.springframework.http.MediaType.APPLICATION_JSON_VALUE)
     public BrandResponse update(
             @AuthenticationPrincipal OidcUser user,
             @PathVariable UUID brandId,

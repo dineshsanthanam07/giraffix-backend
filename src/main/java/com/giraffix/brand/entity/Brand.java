@@ -31,6 +31,16 @@ public class Brand {
     private String primaryColor;
     private String secondaryColor;
 
+    @Column(columnDefinition = "TEXT")
+    private String logoUrl;
+    @Column(length = 255)
+    private String logoBucket;
+    @Column(length = 1024)
+    private String logoKey;
+    @Column(length = 100)
+    private String logoMediaType;
+    private Long logoSizeBytes;
+
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -90,4 +100,18 @@ public class Brand {
 
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
+
+    public String getLogoUrl() { return logoUrl; }
+    public String getLogoBucket() { return logoBucket; }
+    public String getLogoKey() { return logoKey; }
+    public String getLogoMediaType() { return logoMediaType; }
+    public Long getLogoSizeBytes() { return logoSizeBytes; }
+
+    public void setLogo(String url, String bucket, String key, String mediaType, long sizeBytes) {
+        this.logoUrl = url;
+        this.logoBucket = bucket;
+        this.logoKey = key;
+        this.logoMediaType = mediaType;
+        this.logoSizeBytes = sizeBytes;
+    }
 }

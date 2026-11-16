@@ -85,7 +85,8 @@ public class BrandService {
             BrandRequest request) {
 
         User user = userService.getUserByGoogleId(googleId);
-        Brand brand = findOwnedBrand(brandId, user.getId());
+        Brand brand = brandRepository.findOwnedForUpdate(brandId, user.getId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Brand not found"));
 
         if (request.name() != null) {
             if (request.name().isBlank()) {

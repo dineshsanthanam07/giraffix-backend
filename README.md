@@ -1,5 +1,31 @@
 ﻿# Giraffix backend
 
+The [single ad-generation flow](docs/ad-generation.md) accepts a saved product and
+user-selected aspect ratio, matches a concept, writes the supplied v2 creative-director
+prompt with Claude, renders with OpenAI `gpt-image-2` directly, reviews the output,
+and saves the image in S3 with its metadata and prompt in PostgreSQL.
+Start with `POST /api/v1/ads`; poll the returned Location for the final image URL.
+
+The ad request accepts product ID, ratio, and quality together:
+
+```json
+{
+  "productId": "PRODUCT_UUID",
+  "aspectRatio": "3:4",
+  "quality": "medium"
+}
+```
+
+Quality choices are `low`, `medium`, and `high` (default); Swagger lists both quality
+and aspect-ratio choices. Restart the backend to apply Flyway V11 after this update.
+
+The default ad-selection flow uses the [product concept picker](docs/concept-picker.md):
+five random concepts per round, an 80-point threshold, up to three rounds, and a highest-score fallback.
+Batch size, threshold, and round limit are configurable; below-threshold product–concept pairs are excluded from future picker requests.
+
+Concept selection, approval, durable jobs and testing are documented in
+[docs/concept-selection.md](docs/concept-selection.md).
+
 Spring Boot backend for Google sign-in, brand onboarding, products, and Claude image analysis.
 Code follows controller -> service -> repository, organized by feature. PostgreSQL stores
 User -> Brand -> Product relationships. This repository has no frontend.
@@ -55,12 +81,53 @@ on POST, PATCH, DELETE, and logout requests.
 | GET, PATCH, DELETE | `/api/v1/products/{id}` | Read/update/delete product |
 | POST | `/api/v1/products/{id}/images` | Append image files to a saved product |
 | POST | `/api/v1/analyze` | Analyze multipart files `images` together as one product |
+| POST | `/api/v1/ads` | Start concept matching through final ad image generation |
+| GET | `/api/v1/ads/{id}` | Poll progress and retrieve the final authenticated image URL |
 | POST | `/logout` | End session |
 
 Creating a brand marks onboarding complete. Brand creation requires name; product
 creation requires name and category. PATCH permits omitted fields; null leaves the
 stored value unchanged. Blank names/categories, invalid colors, and overlong fields
 are rejected. Ownership violations return 404.
+
+### Brand logo upload
+
+Create a brand with its logo using `POST /api/v1/brands` with multipart/form-data:
+
+- `brand`: the BrandRequest JSON, with part Content-Type `application/json`.
+- `logo`: one nonempty image file, at most 5 MB.
+
+```sh
+curl -X POST http://localhost:8080/api/v1/brands \
+  -b cookies.txt -H "X-XSRF-TOKEN: YOUR_CSRF_TOKEN" \
+  -F 'brand={"name":"Example","industry":"Retail","primaryColor":"#123456"};type=application/json' \
+  -F "logo=@logo.png"
+```
+
+Replace a logo with `PATCH /api/v1/brands/{brandId}`, using the same multipart parts.
+Send `{}` in `brand` to replace only the logo, or include fields to update alongside it.
+The existing JSON create/PATCH endpoints remain available: JSON creation has no logo,
+and text-only PATCH preserves the stored logo. Existing brands need no backfill.
+
+Create, update, individual GET, and list responses include `logoUrl` (null when absent).
+Image bytes are stored in S3 under `brands/logos/`; PostgreSQL stores the URL, bucket,
+object key, media type, and size on the brand row. Flyway V9 adds these nullable columns
+on the next backend startup. Images use the existing content detection and normalization:
+JPEG/PNG/GIF/WebP are kept, supported BMP/TIFF formats convert to PNG, and SVG/HEIC/AVIF
+need conversion or additional decoder support. PNG is suitable for transparent logos.
+
+Ownership is checked before replacement upload and again under a database update lock.
+A failed upload does not change the brand. If saving/committing fails, the new object
+is deleted on a best-effort basis. After a successful replacement commits, the old
+object is deleted. Cleanup failures log `brand_logo_cleanup_failed` for manual recovery;
+there is no durable background cleanup worker. S3 and PostgreSQL cannot commit atomically,
+so process interruption can still leave an orphaned object.
+
+Extend S3 IAM access to allow `s3:PutObject` and `s3:DeleteObject` on
+`arn:aws:s3:::YOUR_BUCKET/brands/logos/*`. Configure read access separately: `logoUrl`
+is a permanent object URL, and uploading does not make a private bucket public.
+The existing session and CSRF requirements apply. In Swagger, choose multipart/form-data
+for brand creation/updating and attach the logo file.
 
 Upload 1–5 photos of ONE product using repeated multipart `images` fields. The legacy
 `image` field is also accepted; do not send both names in the same request. All images
@@ -229,7 +296,7 @@ In Swagger, select the concept POST endpoint and attach the file in `image`.
 The existing login and CSRF requirements apply. Admin-role enforcement is
 intentionally deferred; currently any authenticated user can create/read concepts.
 
-Concept extraction uses `giraffix.concept.model=claude-opus-5-5`, independently of
+Concept extraction uses `giraffix.concept.model=claude-sonnet-5-5`, independently of
 the product analysis model, with the existing `giraffix.ai` connection credentials.
 Its separate `giraffix.concept.max-tokens` and `max-image-size-bytes` properties
 are in application.properties. The concept S3 adapter uses the configured bucket

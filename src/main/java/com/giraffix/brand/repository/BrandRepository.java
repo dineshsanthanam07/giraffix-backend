@@ -21,4 +21,11 @@ public interface BrandRepository
             UUID brandId,
             UUID userId
     );
+
+    boolean existsByIdAndCreatedBy_Id(UUID id, UUID owner);
+
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query("select b from Brand b where b.id = :id and b.createdBy.id = :owner")
+    Optional<Brand> findOwnedForUpdate(@org.springframework.data.repository.query.Param("id") UUID id,
+                                     @org.springframework.data.repository.query.Param("owner") UUID owner);
 }

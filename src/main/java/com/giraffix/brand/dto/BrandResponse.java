@@ -16,6 +16,7 @@ public record BrandResponse(
         String targetAudience,
         String primaryColor,
         String secondaryColor,
+        String logoUrl,
         Instant createdAt,
         Instant updatedAt
 ) {
@@ -28,6 +29,7 @@ public record BrandResponse(
                 brand.getTargetAudience(),
                 brand.getPrimaryColor(),
                 brand.getSecondaryColor(),
+                brand.getLogoUrl(),
                 brand.getCreatedAt(),
                 brand.getUpdatedAt()
         );
