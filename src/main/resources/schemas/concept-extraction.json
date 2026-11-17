@@ -1,0 +1,203 @@
+{
+  "type": "object",
+  "properties": {
+    "usable": {
+      "type": "boolean",
+      "description": "True for a transferable creative idea. False for plain packshots, product listing photos, screenshots or images that are not ads."
+    },
+    "unusable_reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "One sentence explaining why unusable. Must be null when usable is true."
+    },
+    "concept": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "concept_name": {
+              "type": "string",
+              "description": "Short product-independent title, 3-6 words, with no source-product words."
+            },
+            "mechanism": {
+              "type": "string",
+              "enum": [
+                "suspension",
+                "levitation",
+                "scale_shift",
+                "miniature_world",
+                "ingredient_transformation",
+                "product_as_landscape",
+                "unexpected_material",
+                "deconstruction",
+                "shape_rhyme",
+                "object_substitution",
+                "split_comparison",
+                "repetition_pattern",
+                "shadow_storytelling",
+                "negative_space",
+                "frame_within_frame",
+                "typographic_integration",
+                "frozen_motion",
+                "product_as_character",
+                "environmental_storytelling",
+                "nature_reclaiming"
+              ],
+              "description": "The single closest mechanism. Choose the hook, not the setting."
+            },
+            "idea": {
+              "type": "string",
+              "description": "1-2 sentences, under 45 words, no source-product words. State the relationship and supported product role or benefit in product-neutral terms."
+            },
+            "preserve": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 5,
+              "items": {
+                "type": "string"
+              },
+              "description": "3-5 short product-independent elements that must stay the same for another product."
+            },
+            "adapt": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 5,
+              "items": {
+                "type": "string"
+              },
+              "description": "3-5 short product-independent elements that must change for a new product."
+            },
+            "fits_forms": {
+              "type": "array",
+              "minItems": 3,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "rigid_container",
+                  "flexible_pack",
+                  "cosmetic_small",
+                  "apparel",
+                  "footwear",
+                  "small_accessory",
+                  "handheld_device",
+                  "large_appliance",
+                  "furniture",
+                  "food_unpackaged",
+                  "vehicle",
+                  "tool_equipment",
+                  "digital_service"
+                ]
+              },
+              "description": "At least 3 forms, usually 4 including the source product's form."
+            },
+            "bad_fits": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "rigid_container",
+                  "flexible_pack",
+                  "cosmetic_small",
+                  "apparel",
+                  "footwear",
+                  "small_accessory",
+                  "handheld_device",
+                  "large_appliance",
+                  "furniture",
+                  "food_unpackaged",
+                  "vehicle",
+                  "tool_equipment",
+                  "digital_service"
+                ]
+              },
+              "description": "Forms where the concept is absurd, unsafe or physically impossible. May be empty. Must not overlap fits_forms."
+            },
+            "transfer_examples": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Exactly 3 examples with different product_form values from fits_forms, excluding the source product's own form.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "product_form": {
+                    "type": "string",
+                    "enum": [
+                      "rigid_container",
+                      "flexible_pack",
+                      "cosmetic_small",
+                      "apparel",
+                      "footwear",
+                      "small_accessory",
+                      "handheld_device",
+                      "large_appliance",
+                      "furniture",
+                      "food_unpackaged",
+                      "vehicle",
+                      "tool_equipment",
+                      "digital_service"
+                    ]
+                  },
+                  "example": {
+                    "type": "string",
+                    "description": "One sentence describing how the concept would look for this product form."
+                  }
+                },
+                "required": [
+                  "product_form",
+                  "example"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "transferability_score": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "How easily the idea works across many forms and industries, 0-100."
+            },
+            "originality_score": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "How surprising or fresh the idea is, 0-100. Most real ads score 40-75; reserve 85+ for genuinely surprising ideas."
+            },
+            "clarity_score": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "How quickly a viewer understands the idea at a glance, 0-100."
+            }
+          },
+          "required": [
+            "concept_name",
+            "mechanism",
+            "idea",
+            "preserve",
+            "adapt",
+            "fits_forms",
+            "bad_fits",
+            "transfer_examples",
+            "transferability_score",
+            "originality_score",
+            "clarity_score"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Single extracted concept when usable is true; null when false."
+    }
+  },
+  "required": [
+    "usable",
+    "unusable_reason",
+    "concept"
+  ],
+  "additionalProperties": false
+}
+

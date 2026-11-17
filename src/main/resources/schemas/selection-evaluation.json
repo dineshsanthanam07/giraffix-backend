@@ -1,0 +1,20 @@
+{
+  "type":"object","additionalProperties":false,"required":["candidates"],
+  "properties":{"candidates":{"type":"array","items":{
+    "type":"object","additionalProperties":false,
+    "required":["conceptId","conceptVersion","adaptation","ratings","hardViolations","uncertainties","reasons","conceptLevelMismatch"],
+    "properties":{
+      "conceptId":{"type":"string"},"conceptVersion":{"type":"integer"},"adaptation":{"type":"string"},
+      "ratings":{"type":"object","additionalProperties":false,
+        "required":["conceptFidelity","productFidelity","intentFit","visualClarity","renderability"],
+        "properties":{"conceptFidelity":{"type":["integer","null"]},"productFidelity":{"type":["integer","null"]},
+          "intentFit":{"type":["integer","null"]},"visualClarity":{"type":["integer","null"]},"renderability":{"type":["integer","null"]}}},
+      "hardViolations":{"type":"array","items":{"type":"string"}},
+      "uncertainties":{"type":"array","items":{"type":"string"}},
+      "reasons":{"type":"array","items":{"type":"object","additionalProperties":false,
+        "required":["dimension","code","evidenceRefs"],"properties":{"dimension":{"type":"string"},"code":{"type":"string"},
+          "evidenceRefs":{"type":"array","items":{"type":"string"}}}}},
+      "conceptLevelMismatch":{"type":"boolean"}
+    }
+  }}}
+}

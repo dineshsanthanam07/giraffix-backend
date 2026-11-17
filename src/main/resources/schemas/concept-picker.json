@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["evaluations", "notSuitableConceptIds"],
+  "properties": {
+    "evaluations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["conceptId", "compatibilityScore", "classification", "adaptationDirection"],
+        "properties": {
+          "conceptId": {"type": "string"},
+          "compatibilityScore": {"type": "integer", "description": "An integer from 0 to 100"},
+          "classification": {"type": "string", "enum": ["STRONG", "CONDITIONAL", "NOT_SUITABLE"]},
+          "adaptationDirection": {"type": "string"}
+        }
+      }
+    },
+    "notSuitableConceptIds": {"type": "array", "items": {"type": "string"}}
+  }
+}

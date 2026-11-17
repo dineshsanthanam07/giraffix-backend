@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": ["string", "null"], "description": "Visible product name; at most 150 characters. Null if unknown." },
+    "category": { "type": ["string", "null"], "description": "Recognizable product category; at most 100 characters. Null if unknown." },
+    "description": { "type": ["string", "null"], "description": "Concise factual description based on visible evidence, or null." },
+    "keyFeatures": { "type": ["string", "null"], "description": "Visible features in one plain-text string, or null. Never an array." },
+    "targetAudience": { "type": ["string", "null"], "description": "Audience only if explicitly supported by visible evidence; at most 255 characters. Otherwise null." },
+    "imageUrl": { "type": ["string", "null"], "description": "Return null. A hosted image URL cannot be obtained from the uploaded image." }
+  },
+  "required": ["name", "category", "description", "keyFeatures", "targetAudience", "imageUrl"]
+}
