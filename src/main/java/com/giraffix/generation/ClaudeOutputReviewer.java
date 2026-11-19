@@ -53,7 +53,8 @@ public class ClaudeOutputReviewer implements OutputReviewer {
         long input=root.path("usage").path("input_tokens").asLong(-1),out=root.path("usage").path("output_tokens").asLong(-1);
         if(input<0 || out<0)throw new IllegalArgumentException("Missing output review usage");
         // Rates are supplied separately from the generator's cost.
-        return new Review(result.path("accepted").asBoolean(),result.path("reason").asText(),Math.addExact(input*inputRate,out*outputRate+999999)/1000000);
+        return new Review(result.path("accepted").asBoolean(),result.path("reason").asText(),Math.addExact(input*inputRate,out*outputRate+999999)/1000000,
+                input,out,root.path("id").asText(null));
     }
     private Map<String,Object> image(Asset asset){return Map.of("type","image","source",Map.of("type","base64","media_type",asset.mediaType(),"data",Base64.getEncoder().encodeToString(assets.read(asset))));}
 }

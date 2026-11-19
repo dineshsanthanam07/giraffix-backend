@@ -21,6 +21,8 @@ public class ClaudeConceptPicker {
     private final SelectionAssets assets;
     private final JsonNode schema;
     private final String prompt;
+    private com.giraffix.prompt.PromptTemplates templates;
+    public void setTemplates(com.giraffix.prompt.PromptTemplates templates){this.templates=templates;}
 
     public ClaudeConceptPicker(RestClient.Builder builder, ClaudeProperties config, JsonSupport json,
                                SelectionAssets assets) throws IOException {
@@ -53,6 +55,8 @@ public class ClaudeConceptPicker {
             ((tools.jackson.databind.node.ObjectNode) card).put("conceptId", candidate.conceptId().toString());
             return card;
         }).toList();
+        int revision=policy.rubric().contains("@")?Integer.parseInt(policy.rubric().substring(policy.rubric().lastIndexOf('@')+1)):1;
+        String prompt=templates==null?this.prompt:templates.version(com.giraffix.prompt.PromptTemplates.Kind.PICKER,revision).content();
         String instructions = prompt.replace("{{MINIMUM_COMPATIBILITY_SCORE}}", Integer.toString(policy.threshold()));
         String data = json.write(Map.of("product", product, "brand", brand, "concepts", cards,
                 "requestContext", Map.of("intent", context.intent(), "format", context.format(),

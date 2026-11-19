@@ -31,6 +31,9 @@ private/team concept libraries are not introduced here.
 
 ## API and selection
 
+This compatibility API is disabled by default; the normal client flow is `/api/v1/ads`.
+Enable `giraffix.api.legacy-selection-enabled=true` only for clients using these standalone routes.
+
 After login and CSRF setup, POST `/api/v1/selection-requests` with an
 `Idempotency-Key` header and JSON:
 
@@ -49,6 +52,13 @@ HTTP 202 includes the status URL in Location. Poll
 different input for an existing key returns 409. Unknown fields, including score,
 owner, approval or storage overrides, return 400. Existing session/CSRF protection
 and ownership isolation apply.
+
+When `aspectRatio` is omitted, the resulting generation job defaults to a `1:1`
+square image and reserves the creative-prompt budget. Optional `quality` defaults
+to `high`. These defaults are applied to the generation brief; the original
+selection snapshot and idempotency hash remain unchanged. An explicit supported
+aspect ratio is preserved. `/api/v1/ads` continues to require an explicit ratio.
+Jobs created before this change retain their previously saved briefs and limits.
 
 Selection requires an owned uploaded image, nonblank name and category. Legacy
 external imageUrl values do not count. Product image URLs must match the configured
@@ -83,7 +93,8 @@ acceptance by round before adding retrieval or expanding budgets.
 
 ## Durable work, budgets and memory
 
-The dispatcher polls every second and processes work serially. Additional backend
+The dispatcher has separate bounded selection and generation lanes with idle scan
+backoff; see [pipeline configuration and recovery](pipeline.md). Additional backend
 instances may claim distinct work. Disable with
 `giraffix.selection.worker-enabled=false`. Leases/fencing stop stale workers from
 publishing state. They cannot undo an already accepted provider call.
@@ -129,7 +140,8 @@ and reservation; it does not mean an advertisement has been generated.
 
 ## Generation and private outputs
 
-Reservation, immutable brief, generation job and outbox event commit together.
+Reservation, immutable brief and generation job commit together. Workers poll the
+durable jobs directly; new outbox rows are no longer written because there is no outbox consumer.
 The brief snapshots selection policy and separate generation limits. Properties:
 `giraffix.generation.max-cost-micros=2000000`,
 `giraffix.generation.review-reserve-micros=300000`, and

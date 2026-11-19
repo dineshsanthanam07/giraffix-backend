@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 @SpringBootTest(properties={"giraffix.selection.worker-enabled=false","giraffix.selection.admin-subjects=reviewer","giraffix.selection.picker-enabled=false",
-        "spring.jpa.show-sql=false","giraffix.ai.api-key=test-only","spring.flyway.baseline-on-migrate=false"})
+        "spring.jpa.show-sql=false","giraffix.ai.api-key=test-only","spring.flyway.baseline-on-migrate=false","giraffix.api.legacy-selection-enabled=true"})
 class SelectionWorkflowTests {
     @DynamicPropertySource static void database(DynamicPropertyRegistry r){
         boolean pg=System.getProperty("selection.test.jdbc")!=null;
@@ -44,10 +44,10 @@ class SelectionWorkflowTests {
     @MockitoBean AdPromptWriter promptWriter;
     UUID owner,product,brand,concept;
 
-    @BeforeEach void setup(){
+    @BeforeEach void setup() throws Exception {
         db.update("UPDATE selection_requests SET selected_evaluation_id=NULL");
         db.update("UPDATE concept_evaluations SET verified_evaluation_id=NULL");
-        for(String table:List.of("product_concept_exclusions","creations","outbox_events","generation_jobs","concept_allocation_claims","concept_allocations","concept_match_cache",
+        for(String table:List.of("usage_ad_calls","usage_operations","product_concept_exclusions","creations","outbox_events","generation_jobs","concept_allocation_claims","concept_allocations","concept_match_cache",
                 "concept_evaluations","selection_attempts","selection_seen","selection_batches","selection_requests","concept_revisions","concepts","product_images","products","brands","users"))db.update("DELETE FROM "+table);
         owner=UUID.randomUUID();brand=UUID.randomUUID();product=UUID.randomUUID();
         db.update("INSERT INTO users(id,google_id,email,onboarding_completed,created_at) VALUES(?,'selection-owner','owner@example.com',TRUE,?)",owner,stamp(Instant.now()));
@@ -61,10 +61,10 @@ class SelectionWorkflowTests {
             return new Evaluated(cards.stream().map(c->value(c,exact==null?"An unchanged bottle floats within a frame.":exact.adaptation(),4,false)).toList(),new Usage(100,50,"test-provider"));
         });
         when(generator.available()).thenReturn(true);
-        when(generator.generate(any(),any(),any())).thenReturn(new ImageGenerator.Result(new byte[]{1},"image/png","operation-test",100000));
+        when(generator.generate(any(),any(),any())).thenReturn(new ImageGenerator.Result(ProductImageProcessorTests.fixture("png"),"image/png","operation-test",100000));
         when(outputs.put(any(),any(),any())).thenReturn(new Asset("test","creations/test/image","image/png","output-hash"));
         when(reviewer.review(any(),any())).thenReturn(new OutputReviewer.Review(true,"Identity and relationship preserved",10000));
-        when(promptWriter.write(any(),anyLong(),any())).thenReturn(new AdPromptWriter.Result(
+        when(promptWriter.write(any(),anyLong(),any(),anyInt())).thenReturn(new AdPromptWriter.Result(
                 "Render the unchanged product in the selected frame concept, exactly 1:1.","prompt-model","creative-director-v2","prompt-operation",10000));
         policy.batchSize=10;policy.maxRounds=3;policy.maxVerificationCalls=3;policy.maxRetries=1;policy.deadlineSeconds=90;
         policy.maxCostMicros=2500000;policy.maxAttemptCostMicros=350000;
@@ -152,7 +152,7 @@ class SelectionWorkflowTests {
         assertThat(db.queryForObject("SELECT aspect_ratio FROM creations",String.class)).isEqualTo("1:1");
         assertThat(db.queryForObject("SELECT image_prompt FROM creations",String.class)).contains("unchanged product");
         assertThat(db.queryForObject("SELECT spent_micros FROM generation_jobs",Long.class)).isEqualTo(120000);
-        verify(promptWriter,times(1)).write(any(),anyLong(),any());
+        verify(promptWriter,times(1)).write(any(),anyLong(),any(),anyInt());
         verify(generator,times(1)).generate(any(),any(),any());
     }
 
@@ -169,11 +169,109 @@ class SelectionWorkflowTests {
 
     @Test void unknownPromptOutcomeRequiresReconciliationWithoutRendering() {
         var selected=selectedAd();
-        when(promptWriter.write(any(),anyLong(),any())).thenThrow(new RuntimeException("Unknown prompt transport outcome"));
+        when(promptWriter.write(any(),anyLong(),any(),anyInt())).thenThrow(new RuntimeException("Unknown prompt transport outcome"));
         generation.run(selected.generationJobId());generation.run(selected.generationJobId());
         assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("RECONCILIATION_REQUIRED");
-        verify(promptWriter,times(1)).write(any(),anyLong(),any());
+        verify(promptWriter,times(1)).write(any(),anyLong(),any(),anyInt());
         verify(generator,never()).generate(any(),any(),any());
+    }
+
+    @Test void completedReviewResumesPublicationWithoutAnyPaidCall() {
+        var selected=selectedAd();
+        String output=store.json.write(new Asset("test","creations/saved","image/png","saved-hash"));
+        String review=store.json.write(new OutputReviewer.Review(true,"Already reviewed",10000));
+        db.update("UPDATE generation_jobs SET status='REVIEWING',output_json=?,review_started=TRUE,review_json=?,prompt_text='Saved prompt',spent_micros=120000 WHERE id=?",
+                output,review,selected.generationJobId());
+        generation.run(selected.generationJobId());
+        assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("SUCCEEDED");
+        assertThat(db.queryForObject("SELECT spent_micros FROM generation_jobs",Long.class)).isEqualTo(120000);
+        verifyNoInteractions(promptWriter,generator,reviewer,outputs);
+    }
+
+    @Test void transientPublicationFailureReusesDurableReviewAndChargesOnce() {
+        var selected=selectedAd();
+        var contextSpy=spy(contexts);
+        var failed=new java.util.concurrent.atomic.AtomicBoolean();
+        doAnswer(call->{
+            if(db.queryForObject("SELECT review_json FROM generation_jobs WHERE id=?",String.class,selected.generationJobId())!=null
+                    && failed.compareAndSet(false,true))throw new org.springframework.dao.CannotAcquireLockException("Simulated publication lock failure");
+            return call.callRealMethod();
+        }).when(contextSpy).current(any());
+        var pipeline=new GenerationWorker(store,contextSpy,generator,outputs,reviewer,promptWriter,assets);
+        try{
+            pipeline.run(selected.generationJobId());
+            assertThat(failed).isTrue();
+            assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("REVIEWING");
+            assertThat(count("creations")).isZero();
+            assertThat(generation.pending(10)).doesNotContain(selected.generationJobId());
+            clearInvocations(promptWriter,generator,reviewer,outputs);
+            db.update("UPDATE generation_jobs SET next_attempt_at=? WHERE id=?",stamp(Instant.now().minusSeconds(1)),selected.generationJobId());
+            pipeline.run(selected.generationJobId());
+            assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("SUCCEEDED");
+            assertThat(count("creations")).isEqualTo(1);
+            assertThat(db.queryForObject("SELECT spent_micros FROM generation_jobs",Long.class)).isEqualTo(120000);
+            verifyNoInteractions(promptWriter,generator,reviewer,outputs);
+        }finally{pipeline.close();}
+    }
+
+    @Test void interruptedReviewWithoutSavedResultIsNeverRepeated() {
+        var selected=selectedAd();
+        db.update("UPDATE generation_jobs SET status='REVIEWING',review_started=TRUE WHERE id=?",selected.generationJobId());
+        generation.run(selected.generationJobId());
+        generation.run(selected.generationJobId());
+        assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("RECONCILIATION_REQUIRED");
+        verifyNoInteractions(promptWriter,generator,reviewer,outputs);
+    }
+
+    @Test void providerWaitBackoffDoesNotKeepClaimingTheSameJob() {
+        var selected=selectedAd();
+        when(generator.available()).thenReturn(false);
+        generation.run(selected.generationJobId());
+        generation.run(selected.generationJobId());
+        assertThat(generation.pending(10)).doesNotContain(selected.generationJobId());
+        assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("WAITING_FOR_PROVIDER");
+        verify(generator,times(1)).available();
+        verifyNoInteractions(promptWriter,reviewer,outputs);
+    }
+
+    @Test void expiredDeadlineDuringReviewCannotPublishOrRepeatReview() {
+        var selected=selectedAd();
+        when(reviewer.review(any(),any())).thenAnswer(call->{
+            db.update("UPDATE generation_jobs SET deadline=? WHERE id=?",stamp(Instant.now().minusSeconds(1)),selected.generationJobId());
+            return new OutputReviewer.Review(true,"Reviewed",10000);
+        });
+        generation.run(selected.generationJobId());
+        generation.run(selected.generationJobId());
+        assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("FAILED");
+        assertThat(count("creations")).isZero();
+        assertThat(count("concept_allocation_claims")).isZero();
+        verify(reviewer,times(1)).review(any(),any());
+    }
+
+    @Test void providerStagesExecuteOutsideDatabaseTransactions() throws Exception {
+        var selected=selectedAd();
+        when(promptWriter.write(any(),anyLong(),any(),anyInt())).thenAnswer(call->{
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            return new AdPromptWriter.Result("Render the unchanged product exactly 1:1.","model","v2","prompt-op",10000);
+        });
+        when(generator.generate(any(),any(),any())).thenAnswer(call->{
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            return new ImageGenerator.Result(ProductImageProcessorTests.fixture("png"),"image/png","image-op",100000);
+        });
+        when(reviewer.review(any(),any())).thenAnswer(call->{
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            return new OutputReviewer.Review(true,"Reviewed",10000);
+        });
+        generation.run(selected.generationJobId());
+        assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("SUCCEEDED");
+    }
+
+    @Test void unknownSelectionTransportOutcomeKeepsReservationAndDoesNotRetry() {
+        when(evaluator.evaluate(any(),anyList(),any(),any())).thenThrow(new org.springframework.web.client.ResourceAccessException("Unknown provider timeout"));
+        assertThat(run(null).status()).isEqualTo("PROVIDER_FAILED");
+        verify(evaluator,times(1)).evaluate(any(),anyList(),any(),any());
+        assertThat(count("selection_attempts")).isEqualTo(1);
+        assertThat(db.queryForObject("SELECT spent_micros FROM selection_requests",Long.class)).isEqualTo(350000);
     }
 
     @Test void crashedPromptCallIsNotRedispatched() {
@@ -219,6 +317,7 @@ class SelectionWorkflowTests {
         assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("OUTPUT_REJECTED");
         assertThat(count("creations")).isZero();
         verifyNoInteractions(reviewer);
+        verify(outputs,never()).put(any(),any(),any());
     }
 
     @Test
@@ -380,7 +479,7 @@ class SelectionWorkflowTests {
         var selected=run(null);assertThat(selected.status()).isEqualTo("SELECTED");
         assertThat(selected.rounds()).isEqualTo(1);assertThat(selected.verificationCalls()).isEqualTo(1);
         assertThat(count("selection_attempts")).isEqualTo(2);assertThat(count("concept_evaluations")).isEqualTo(2);
-        assertThat(count("outbox_events")).isEqualTo(1);assertThat(count("concept_allocations")).isEqualTo(1);
+        assertThat(count("outbox_events")).isZero();assertThat(count("concept_allocations")).isEqualTo(1);
         worker.run(selected.id());generation.run(selected.generationJobId());generation.run(selected.generationJobId());
         assertThat(count("creations")).isEqualTo(1);
         assertThat(db.queryForObject("SELECT state FROM concept_allocations",String.class)).isEqualTo("CONSUMED");
@@ -478,11 +577,13 @@ class SelectionWorkflowTests {
         generation.run(selected.generationJobId());generation.run(selected.generationJobId());
         assertThat(service.status("selection-owner",selected.id()).generationStatus()).isEqualTo("RECONCILIATION_REQUIRED");
         assertThat(count("concept_allocation_claims")).isEqualTo(1);verify(generator,times(1)).generate(any(),any(),any());
+        verify(outputs,never()).cleanup(any(),any(),any());
     }
     @Test void rejectedOutputReleasesButDoesNotEraseHistory(){
         var selected=run(null);when(reviewer.review(any(),any())).thenReturn(new OutputReviewer.Review(false,"Product was altered",10000));
         generation.run(selected.generationJobId());assertThat(count("creations")).isZero();assertThat(count("concept_allocation_claims")).isZero();
         assertThat(db.queryForObject("SELECT state FROM concept_allocations",String.class)).isEqualTo("RELEASED");assertThat(count("concept_evaluations")).isEqualTo(2);
+        verify(outputs,times(1)).cleanup(any(),eq(selected.generationJobId()),any());
     }
     @Test void editingProductDoesNotResetConsumedHistory(){
         var selected=run(null);generation.run(selected.generationJobId());
@@ -612,7 +713,7 @@ class SelectionWorkflowTests {
     }
     @Test void creationHistoryAndImageDeliveryRemainPrivate() throws Exception {
         var selected=run(null);generation.run(selected.generationJobId());
-        var controller=new CreationController(store,contexts,assets);
+        var controller=new CreationController(store,assets,mock(GeneratedAdDeletionQueue.class));
         var user=mock(org.springframework.security.oauth2.core.oidc.user.OidcUser.class);when(user.getSubject()).thenReturn("selection-owner");
         var history=controller.list(user,product,0,20);assertThat(history).hasSize(1);
         UUID creation=history.get(0).id();assertThat(history.get(0).imageUrl()).isEqualTo("/api/v1/creations/"+creation+"/image");

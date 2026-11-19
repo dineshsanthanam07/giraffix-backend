@@ -96,7 +96,8 @@ public class OpenAiImageGenerator implements ImageGenerator {
         if (cost > budget.maxCostMicros()) throw new IllegalArgumentException("Image generation cost exceeded budget");
         String operation = root.path("id").asText();
         if (operation.isBlank()) operation = Objects.toString(response.getHeaders().getFirst("x-request-id"), jobId.toString());
-        return new Result(bytes, prepared.mediaType(), operation, cost);
+        long inputTokens=root.at("/usage/input_tokens").asLong(-1),outputTokens=root.at("/usage/output_tokens").asLong(-1);
+        return new Result(bytes,prepared.mediaType(),operation,cost,inputTokens<0?null:inputTokens,outputTokens<0?null:outputTokens,root.path("model").asText(model));
     }
 
     private Map<String,Object> reference(Asset asset) {

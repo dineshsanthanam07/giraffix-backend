@@ -28,6 +28,8 @@ public class ClaudeAdPromptWriter implements AdPromptWriter {
     private final String model;
     private final String instructions;
     private final int maxOutput;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.giraffix.prompt.PromptTemplates templates;
     private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(ClaudeAdPromptWriter.class);
 
     public ClaudeAdPromptWriter(RestClient.Builder builder, ClaudeProperties config, JsonSupport json,
@@ -46,6 +48,10 @@ public class ClaudeAdPromptWriter implements AdPromptWriter {
     }
 
     public Result write(Brief brief, long maxCostMicros, Instant deadline) {
+        return write(brief,maxCostMicros,deadline,templates==null?1:templates.current(com.giraffix.prompt.PromptTemplates.Kind.DIRECTOR).version());
+    }
+    @Override public Result write(Brief brief,long maxCostMicros,Instant deadline,int templateVersion){
+        String instructions=templates==null?this.instructions:templates.version(com.giraffix.prompt.PromptTemplates.Kind.DIRECTOR,templateVersion).content();
         if (brief.context().aspectRatio() == null || brief.context().images().isEmpty())
             throw new IllegalArgumentException("Product photos and requested aspect ratio are required");
         List<Map<String,Object>> content = new ArrayList<>();
@@ -110,7 +116,7 @@ public class ClaudeAdPromptWriter implements AdPromptWriter {
             throw new PromptGenerationException("PROMPT_TEXT_INVALID","Prompt provider returned empty, overlong, or fenced prompt text",providerId,stop,actual);
         if (input < 0 || out < 0 || out > maxOutput) throw new IllegalArgumentException("Invalid prompt usage");
         if (actual > maxCostMicros) throw new PromptGenerationException("PROMPT_BUDGET_EXCEEDED","Prompt provider usage exceeded the configured budget",providerId,stop,actual);
-        return new Result(output, model, VERSION, root.path("id").asText(), actual);
+        return new Result(output,model,templateVersion==1?VERSION:VERSION+"@"+templateVersion,root.path("id").asText(),actual,input,out);
     }
 
     private String bounded(String value,int max){return value.replaceAll("[\\p{Cntrl}\\u2028\\u2029]"," ").substring(0,Math.min(value.length(),max));}

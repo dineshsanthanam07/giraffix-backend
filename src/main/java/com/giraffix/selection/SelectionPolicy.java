@@ -7,6 +7,8 @@ import java.util.List;
 
 @Component
 public class SelectionPolicy {
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.giraffix.prompt.PromptTemplates prompts;
     @Value("${giraffix.selection.picker-enabled:true}") public boolean pickerEnabled = true;
     @Value("${giraffix.selection.batch-size:5}") public int batchSize = 5;
     @Value("${giraffix.selection.max-rounds:3}") public int maxRounds = 3;
@@ -46,8 +48,13 @@ public class SelectionPolicy {
     }
 
     public Snapshot snapshot() {
+        String rubric=pickerEnabled ? "concept-picker-prompt-v1" : "selection-rubric-v1";
+        if(pickerEnabled && prompts!=null){
+            int revision=prompts.current(com.giraffix.prompt.PromptTemplates.Kind.PICKER).version();
+            if(revision>1)rubric+="@"+revision;
+        }
         return new Snapshot(pickerEnabled ? ConceptPickerRules.VERSION : "weighted-fit-v1",
-                pickerEnabled ? "concept-picker-prompt-v1" : "selection-rubric-v1", model, batchSize, maxRounds,
+                rubric, model, batchSize, maxRounds,
                 maxVerificationCalls, maxRetries, deadlineSeconds, minimumRating, threshold,
                 lowScoreThreshold, cooldownDays, maxCostMicros, maxAttemptCostMicros,
                 maxInputTokens, maxOutputTokens, inputRate, outputRate, List.copyOf(weights));

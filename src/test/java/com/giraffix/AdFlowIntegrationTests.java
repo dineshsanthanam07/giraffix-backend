@@ -47,10 +47,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties={"spring.datasource.url=jdbc:h2:mem:ad_flow;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
         "spring.datasource.username=sa","spring.datasource.password=","spring.datasource.driver-class-name=org.h2.Driver",
         "giraffix.ai.api-key=test-only","spring.jpa.show-sql=false","giraffix.selection.worker-enabled=false",
+        "giraffix.storage.cleanup.worker-enabled=false",
         "giraffix.storage.s3.bucket=ad-test","giraffix.generation.openai.api-key=test-openai",
         "giraffix.generation.openai.model=gpt-image-2",
         "giraffix.generation.prompt-max-output-tokens=8192",
-        "giraffix.generation.prompt-model=test-director"})
+        "giraffix.generation.prompt-model=test-director","giraffix.selection.admin-subjects=prompt-admin"})
 class AdFlowIntegrationTests {
     static final AtomicReference<String> promptRequest=new AtomicReference<>(), imageRequest=new AtomicReference<>();
     static final AtomicReference<String> promptReply=new AtomicReference<>(), imageReply=new AtomicReference<>();
@@ -93,6 +94,14 @@ class AdFlowIntegrationTests {
     @Autowired SelectionContextService contexts;
     @Autowired SelectionAssets assets;
     @Autowired ImageGenerator generator;
+    @Autowired AdStatusService adStatuses;
+    @Autowired com.giraffix.usage.UsageService usage;
+    @Autowired com.giraffix.concept.service.ConceptService concepts;
+    @Autowired GeneratedAdDeletionQueue adDeletions;
+    @Autowired com.giraffix.product.service.ProductService products;
+    @Autowired com.giraffix.product.service.ProductImageDeletionQueue productDeletions;
+    @Autowired com.giraffix.prompt.PromptTemplates templates;
+    @Autowired AdPromptWriter writer;
     @Autowired WebApplicationContext webContext;
     @MockitoBean ConceptEvaluator evaluator;
     @MockitoBean OutputReviewer reviewer;
@@ -106,7 +115,7 @@ class AdFlowIntegrationTests {
     @BeforeEach void setup() throws Exception {
         db.update("UPDATE selection_requests SET selected_evaluation_id=NULL");
         db.update("UPDATE concept_evaluations SET verified_evaluation_id=NULL");
-        for(String table:List.of("product_concept_exclusions","creations","outbox_events","generation_jobs","concept_allocation_claims","concept_allocations","concept_match_cache",
+        for(String table:List.of("usage_ad_calls","usage_operations","generated_ad_deletions","product_image_deletions","product_concept_exclusions","creations","outbox_events","generation_jobs","concept_allocation_claims","concept_allocations","concept_match_cache",
                 "concept_evaluations","selection_attempts","selection_seen","selection_batches","selection_requests","concept_revisions","concepts","product_images","products","brands","users"))db.update("DELETE FROM "+table);
         promptCalls.set(0);imageCalls.set(0);promptRequest.set(null);imageRequest.set(null);
         imageStatus.set(200);
@@ -131,6 +140,10 @@ class AdFlowIntegrationTests {
             try(var input=body.contentStreamProvider().newStream()){objects.put(request.key(),input.readAllBytes());}
             return PutObjectResponse.builder().build();
         });
+        when(s3.deleteObject(any(DeleteObjectRequest.class))).thenAnswer(call->{
+            objects.remove(((DeleteObjectRequest)call.getArgument(0)).key());
+            return DeleteObjectResponse.builder().build();
+        });
         db.update("INSERT INTO users(id,google_id,email,onboarding_completed,created_at) VALUES(?,?,?,TRUE,?)",owner,subject,"owner@example.com",stamp(Instant.now()));
         db.update("INSERT INTO brands(id,user_id,name,description,primary_color,created_at,updated_at) VALUES(?,?,'Fresh Brand','Playful identity','#123456',?,?)",brand,owner,stamp(Instant.now()),stamp(Instant.now()));
         db.update("INSERT INTO products(id,brand_id,name,category,description,created_at,updated_at) VALUES(?,?,'Actual Bottle','Drinkware','Saved generated product description',?,?)",product,brand,stamp(Instant.now()),stamp(Instant.now()));
@@ -153,7 +166,9 @@ class AdFlowIntegrationTests {
     }
     MockMvc mvc(String identity, ImageGenerator renderer) {
         var user=mock(OidcUser.class);when(user.getSubject()).thenReturn(identity);
-        return MockMvcBuilders.standaloneSetup(new AdController(selections,store,contexts,renderer),new CreationController(store,contexts,assets))
+        return MockMvcBuilders.standaloneSetup(new AdController(selections,adStatuses,renderer),new CreationController(store,assets,adDeletions),
+                        new com.giraffix.product.controller.ProductController(products,usage),
+                        new com.giraffix.concept.controller.ConceptController(concepts,usage))
                 .setCustomArgumentResolvers(new HandlerMethodArgumentResolver(){
                     public boolean supportsParameter(MethodParameter p){return p.getParameterType()==OidcUser.class;}
                     public Object resolveArgument(MethodParameter p,ModelAndViewContainer c,NativeWebRequest r,WebDataBinderFactory f){return user;}
@@ -176,6 +191,185 @@ class AdFlowIntegrationTests {
     UUID runAd() throws Exception {
         var id=enqueue("ad-"+UUID.randomUUID());selectionWorker.run(id);
         generation.run(selections.status(subject,id).generationJobId());return id;
+    }
+
+    UUID creation(UUID operation){
+        return db.queryForObject("SELECT c.id FROM creations c JOIN generation_jobs g ON g.id=c.job_id JOIN concept_allocations a ON a.id=g.allocation_id WHERE a.request_id=?",UUID.class,operation);
+    }
+
+    @Test void productDeletionPreservesSavedAdMetadataImageAndBrandFilters() throws Exception {
+        UUID operation=runAd(),saved=creation(operation);
+        UUID job=selections.status(subject,operation).generationJobId();
+        String outputKey="creations/"+owner+"/"+job+"/output";
+        products.deleteProduct(subject,product);
+        productDeletions.processPending();
+        assertThat(objects).doesNotContainKey("products/"+product+"/front.png").containsKey(outputKey);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM generated_ad_deletions",Integer.class)).isZero();
+        mvc.perform(get("/api/v1/ads/"+operation)).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("SUCCEEDED"));
+        mvc.perform(get("/api/v1/ads/saved/"+saved)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.ad.productId").value(product.toString()))
+                .andExpect(jsonPath("$.ad.brandId").value(brand.toString()))
+                .andExpect(jsonPath("$.imagePrompt").value(FINAL_PROMPT));
+        mvc.perform(get("/api/v1/creations/"+saved)).andExpect(status().isOk());
+        for(String image:List.of("/api/v1/creations/"+saved+"/image","/api/v1/ads/saved/"+saved+"/image"))
+            mvc.perform(get(image)).andExpect(status().isOk()).andExpect(content().bytes(outputImage));
+        for(String query:List.of("","?productId="+product,"?brandId="+brand,"?productId="+product+"&brandId="+brand))
+            mvc.perform(get("/api/v1/ads"+query)).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1))
+                    .andExpect(jsonPath("$[0].id").value(saved.toString()));
+        mvc.perform(get("/api/v1/products/"+product+"/creations")).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1));
+    }
+
+    @Test void explicitAdDeletionCommitsCleanupAndPreservesProductPhotos() throws Exception {
+        UUID operation=runAd(),saved=creation(operation),job=selections.status(subject,operation).generationJobId();
+        String outputKey="creations/"+owner+"/"+job+"/output";
+        mvc.perform(delete("/api/v1/ads/saved/"+saved)).andExpect(status().isNoContent());
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM creations WHERE id=?",Integer.class,saved)).isZero();
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM generated_ad_deletions",Integer.class)).isEqualTo(1);
+        assertThat(objects).containsKeys(outputKey,"products/"+product+"/front.png");
+        verify(s3,never()).deleteObject(any(DeleteObjectRequest.class));
+        mvc.perform(get("/api/v1/ads/"+operation)).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("DELETED"));
+        mvc.perform(get("/api/v1/ads/saved/"+saved)).andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/creations/"+saved+"/image")).andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/ads")).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(0));
+        mvc.perform(delete("/api/v1/ads/saved/"+saved)).andExpect(status().isNotFound());
+        adDeletions.processPending();
+        assertThat(objects).doesNotContainKey(outputKey).containsKey("products/"+product+"/front.png");
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM generated_ad_deletions",Integer.class)).isZero();
+        generation.run(job);
+        assertThat(imageCalls.get()).isEqualTo(1);
+    }
+
+    @Test void adDeletionFailureRetainsDurableCleanupAndRetriesOutsideTransactions() throws Exception {
+        UUID operation=runAd(),saved=creation(operation),job=selections.status(subject,operation).generationJobId();
+        String key="creations/"+owner+"/"+job+"/output";
+        var fail=new AtomicBoolean(true);
+        when(s3.deleteObject(any(DeleteObjectRequest.class))).thenAnswer(call->{
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            if(fail.getAndSet(false))throw S3Exception.builder().statusCode(503).build();
+            objects.remove(((DeleteObjectRequest)call.getArgument(0)).key());
+            return DeleteObjectResponse.builder().build();
+        });
+        mvc.perform(delete("/api/v1/creations/"+saved)).andExpect(status().isNoContent());
+        adDeletions.processPending();
+        assertThat(objects).containsKey(key);
+        assertThat(db.queryForObject("SELECT attempts FROM generated_ad_deletions",Integer.class)).isEqualTo(1);
+        adDeletions.processPending();
+        verify(s3,times(1)).deleteObject(any(DeleteObjectRequest.class));
+        db.update("UPDATE generated_ad_deletions SET next_attempt_at=?",stamp(Instant.now().minusSeconds(1)));
+        adDeletions.processPending();
+        assertThat(objects).doesNotContainKey(key);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM generated_ad_deletions",Integer.class)).isZero();
+    }
+
+    @Test void failedAdDeletionCommitPreservesAdAndImageWithoutCleanupIntent() throws Exception {
+        UUID operation=runAd(),saved=creation(operation);
+        var controller=webContext.getBean(CreationController.class);
+        var user=mock(OidcUser.class);when(user.getSubject()).thenReturn(subject);
+        assertThatThrownBy(()->store.transaction(()->{
+            controller.delete(user,saved);
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                    new org.springframework.transaction.support.TransactionSynchronization(){
+                        @Override public void beforeCommit(boolean readOnly){throw new IllegalStateException("Commit failed");}
+                    });
+            return null;
+        })).isInstanceOf(IllegalStateException.class);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM generated_ad_deletions",Integer.class)).isZero();
+        mvc.perform(get("/api/v1/ads/saved/"+saved+"/image")).andExpect(status().isOk()).andExpect(content().bytes(outputImage));
+        mvc.perform(get("/api/v1/ads/"+operation)).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("SUCCEEDED"));
+        adDeletions.processPending();
+        verify(s3,never()).deleteObject(any(DeleteObjectRequest.class));
+    }
+
+    @Test void archivedAdsRemainPrivateAndFiltersAndPaginationAreBounded() throws Exception {
+        UUID operation=runAd(),saved=creation(operation);
+        products.deleteProduct(subject,product);
+        var stranger=mvc("foreign-identity");
+        for(String path:List.of("/api/v1/ads/saved/"+saved,"/api/v1/creations/"+saved,"/api/v1/creations/"+saved+"/image",
+                "/api/v1/ads/"+operation,"/api/v1/products/"+product+"/creations"))
+            stranger.perform(get(path)).andExpect(status().isNotFound());
+        stranger.perform(delete("/api/v1/ads/saved/"+saved)).andExpect(status().isNotFound());
+        stranger.perform(get("/api/v1/ads?productId="+product+"&brandId="+brand)).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(0));
+        mvc.perform(get("/api/v1/ads?productId="+UUID.randomUUID())).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(0));
+        mvc.perform(get("/api/v1/ads?brandId="+UUID.randomUUID())).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(0));
+        mvc.perform(get("/api/v1/ads?page=1&size=1")).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(0));
+        for(String query:List.of("size=0","size=101","page=-1","page=1000001","productId=bad"))
+            mvc.perform(get("/api/v1/ads?"+query)).andExpect(status().isBadRequest());
+        verify(s3,never()).deleteObject(any(DeleteObjectRequest.class));
+    }
+
+    @Test void deletingProductBeforeGenerationReleasesUnusedReservation() throws Exception {
+        UUID operation=enqueue("delete-before-render");selectionWorker.run(operation);
+        UUID job=selections.status(subject,operation).generationJobId();
+        products.deleteProduct(subject,product);
+        generation.run(job);
+        assertThat(db.queryForObject("SELECT status FROM generation_jobs WHERE id=?",String.class,job)).isEqualTo("STALE_CONTEXT");
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM concept_allocation_claims",Integer.class)).isZero();
+        assertThat(imageCalls.get()).isZero();assertThat(promptCalls.get()).isZero();
+        mvc.perform(get("/api/v1/ads/"+operation)).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("STALE_CONTEXT"));
+    }
+
+    @Test void expiredAdCleanupLeaseSafelyReplaysRemoteSuccessAfterRestart() throws Exception {
+        UUID operation=runAd(),saved=creation(operation),job=selections.status(subject,operation).generationJobId();
+        mvc.perform(delete("/api/v1/ads/saved/"+saved)).andExpect(status().isNoContent());
+        objects.remove("creations/"+owner+"/"+job+"/output");
+        db.update("UPDATE generated_ad_deletions SET lease_token=?,lease_until=?,attempts=1",
+                UUID.randomUUID(),stamp(Instant.now().plusSeconds(120)));
+        adDeletions.processPending();
+        verify(s3,never()).deleteObject(any(DeleteObjectRequest.class));
+        db.update("UPDATE generated_ad_deletions SET lease_until=?",stamp(Instant.now().minusSeconds(1)));
+        adDeletions.processPending();
+        verify(s3).deleteObject(any(DeleteObjectRequest.class));
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM generated_ad_deletions",Integer.class)).isZero();
+    }
+
+    @Test void savedAdDeletionRequiresOwnerSessionAndCsrf() throws Exception {
+        UUID operation=runAd(),saved=creation(operation);
+        var secured=MockMvcBuilders.webAppContextSetup(webContext)
+                .addFilters(webContext.getBean("springSecurityFilterChain",jakarta.servlet.Filter.class)).build();
+        for(String path:List.of("/api/v1/ads","/api/v1/ads/saved/"+saved,"/api/v1/ads/saved/"+saved+"/image"))
+            secured.perform(get(path)).andExpect(status().isUnauthorized());
+        var user=mock(OidcUser.class);when(user.getSubject()).thenReturn(subject);
+        var roles=List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_USER"));
+        var auth=new org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken(user,roles,"google");
+        var session=new org.springframework.mock.web.MockHttpSession();
+        session.setAttribute(org.springframework.security.web.context.HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY,
+                new org.springframework.security.core.context.SecurityContextImpl(auth));
+        secured.perform(get("/api/v1/ads").session(session)).andExpect(status().isOk());
+        secured.perform(delete("/api/v1/ads/saved/"+saved).session(session)).andExpect(status().isForbidden());
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM creations WHERE id=?",Integer.class,saved)).isEqualTo(1);
+        var csrf=secured.perform(get("/api/v1/security/csrf").session(session)).andExpect(status().isOk()).andReturn().getResponse();
+        var token=mapper.readTree(csrf.getContentAsString());
+        secured.perform(delete("/api/v1/ads/saved/"+saved).session(session).cookie(csrf.getCookies())
+                .header(token.path("headerName").asText(),token.path("token").asText())).andExpect(status().isNoContent());
+    }
+
+    @Test void progressEventsUseOwnerSessionAndRemainAvailableAfterProductDeletion() throws Exception {
+        UUID operation=runAd();
+        products.deleteProduct(subject,product);
+        var secured=MockMvcBuilders.webAppContextSetup(webContext)
+                .addFilters(webContext.getBean("springSecurityFilterChain",jakarta.servlet.Filter.class)).build();
+        String path="/api/v1/ads/"+operation+"/events";
+        secured.perform(get(path).accept(org.springframework.http.MediaType.TEXT_EVENT_STREAM)).andExpect(status().isUnauthorized());
+        var user=mock(OidcUser.class);when(user.getSubject()).thenReturn(subject);
+        var roles=List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_USER"));
+        var auth=new org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken(user,roles,"google");
+        var session=new org.springframework.mock.web.MockHttpSession();
+        session.setAttribute(org.springframework.security.web.context.HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY,
+                new org.springframework.security.core.context.SecurityContextImpl(auth));
+        var response=secured.perform(get(path).session(session).accept(org.springframework.http.MediaType.TEXT_EVENT_STREAM))
+                .andExpect(status().isOk()).andExpect(request().asyncStarted()).andReturn();
+        response.getAsyncResult(5000);
+        secured.perform(asyncDispatch(response)).andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("event:progress")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("Your ad is ready")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"terminal\":true")));
+        var foreign=mock(OidcUser.class);when(foreign.getSubject()).thenReturn("other-account");
+        session.setAttribute(org.springframework.security.web.context.HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY,
+                new org.springframework.security.core.context.SecurityContextImpl(
+                        new org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken(foreign,roles,"google")));
+        secured.perform(get(path).session(session).accept(org.springframework.http.MediaType.TEXT_EVENT_STREAM))
+                .andExpect(status().isNotFound()).andExpect(content().contentType(org.springframework.http.MediaType.APPLICATION_JSON));
+        assertThat(promptCalls.get()).isEqualTo(1);assertThat(imageCalls.get()).isEqualTo(1);
     }
 
     @Test void completeFlowUsesActualPhotosLogoAndPromptThenStoresAndReturnsPrivateImage() throws Exception {
@@ -207,13 +401,100 @@ class AdFlowIntegrationTests {
         assertThat(db.queryForObject("SELECT prompt_version FROM creations WHERE job_id=?",String.class,job)).isEqualTo("creative-director-v2");
         assertThat(db.queryForObject("SELECT spent_micros FROM generation_jobs WHERE id=?",Long.class,job)).isEqualTo(5880);
         verify(reviewer).review(argThat(b->b.context().brandLogo()!=null && b.imagePrompt().equals(FINAL_PROMPT)),any());
+        // Snapshot/selection and generation each verify the source once; rendering reuses the verified bytes.
+        verify(s3,times(2)).getObject(argThat((GetObjectRequest r)->r.key().equals("products/"+product+"/front.png")));
+        verify(s3,times(2)).getObject(argThat((GetObjectRequest r)->r.key().equals("brands/logos/"+brand+".jpg")));
+        verify(s3,times(2)).getObject(argThat((GetObjectRequest r)->r.key().equals("concept/"+concept+"/reference.png")));
         generation.run(job);assertThat(promptCalls.get()).isEqualTo(1);assertThat(imageCalls.get()).isEqualTo(1);
+    }
+
+    @Test void adUsageCapturesEachStageAndIdempotentReplayDoesNotDuplicateUsage() throws Exception {
+        UUID operation=enqueue("usage-replay");selectionWorker.run(operation);
+        generation.run(selections.status(subject,operation).generationJobId());
+        assertThat(enqueue("usage-replay")).isEqualTo(operation);
+        var totals=usage.summary(null,null,owner,product,brand,com.giraffix.usage.UsageService.Kind.AD);
+        assertThat(totals.requests()).isEqualTo(1);assertThat(totals.accountedCostMicros()).isEqualTo(6580);
+        assertThat(totals.recordedInputTokens()).isEqualTo(300);assertThat(totals.recordedOutputTokens()).isEqualTo(250);
+        // The mocked reviewer intentionally reports no token counts; retain that uncertainty.
+        assertThat(totals.incompleteTokenOperations()).isEqualTo(1);
+        assertThat(usage.calls(operation,0,100)).hasSize(4);
+        assertThat(usage.models(null,null,owner,product,brand,null,0,100)).extracting(com.giraffix.usage.UsageService.ModelUsage::stage)
+                .containsExactlyInAnyOrder("SELECTION_SCREEN","PROMPT","RENDER","REVIEW");
+    }
+
+    @Test void actualProductAndConceptAnalysisEndpointsRecordProviderTokensPerUser() throws Exception {
+        String productJson="{\"name\":\"Bottle\",\"category\":\"Drinkware\",\"description\":\"A bottle\",\"keyFeatures\":null,\"targetAudience\":null,\"imageUrl\":null}";
+        promptReply.set(mapper.writeValueAsString(Map.of("id","product-analysis-usage","stop_reason","end_turn",
+                "content",List.of(Map.of("type","text","text",productJson)),"usage",Map.of("input_tokens",100,"output_tokens",25))));
+        mvc.perform(multipart("/api/v1/analyze").file(new org.springframework.mock.web.MockMultipartFile("images","front.png","image/png",productPhoto)))
+                .andExpect(status().isOk());
+        var productUsage=usage.summary(null,null,owner,null,null,com.giraffix.usage.UsageService.Kind.PRODUCT_ANALYSIS);
+        assertThat(productUsage.requests()).isEqualTo(1);assertThat(productUsage.recordedInputTokens()).isEqualTo(100);
+        assertThat(productUsage.recordedOutputTokens()).isEqualTo(25);assertThat(productUsage.accountedCostMicros()).isEqualTo(450);
+        promptReply.set(mapper.writeValueAsString(Map.of("id","concept-analysis-usage","stop_reason","end_turn",
+                "content",List.of(Map.of("type","text","text",ConceptFixtures.VALID)),"usage",Map.of("input_tokens",200,"output_tokens",50))));
+        mvc.perform(multipart("/api/v1/concepts").file(new org.springframework.mock.web.MockMultipartFile("image","reference.png","image/png",productPhoto)))
+                .andExpect(status().isCreated());
+        var conceptUsage=usage.summary(null,null,owner,null,null,com.giraffix.usage.UsageService.Kind.CONCEPT_ANALYSIS);
+        assertThat(conceptUsage.requests()).isEqualTo(1);assertThat(conceptUsage.recordedInputTokens()).isEqualTo(200);
+        assertThat(conceptUsage.recordedOutputTokens()).isEqualTo(50);assertThat(conceptUsage.accountedCostMicros()).isEqualTo(900);
+        assertThat(usage.summary(null,null,owner,null,null,null).requests()).isEqualTo(2);
+        assertThat(promptCalls.get()).isEqualTo(2);assertThat(imageCalls.get()).isZero();
+    }
+
+    @Test void productOnlySelectionGeneratesSquareAdAndPreservesIdempotentReplay() throws Exception {
+        byte[] square = ProductImageProcessorTests.fixture("png");
+        imageReply.set(mapper.writeValueAsString(Map.of("data", List.of(Map.of(
+                "b64_json", Base64.getEncoder().encodeToString(square))))));
+        String key = "product-only-" + UUID.randomUUID();
+        var input = new Start(product, null, null, null, null);
+        var request = selections.start(subject, key, input);
+        selectionWorker.run(request.id());
+        var selected = selections.status(subject, request.id());
+
+        generation.run(selected.generationJobId());
+
+        assertThat(selections.status(subject, request.id()).generationStatus()).isEqualTo("SUCCEEDED");
+        assertThat(mapper.readTree(promptRequest.get()).at("/messages/0/content").toString()).contains("1:1");
+        var render = mapper.readTree(imageRequest.get());
+        assertThat(render.path("size").asText()).isEqualTo("1024x1024");
+        assertThat(render.path("quality").asText()).isEqualTo("high");
+        assertThat(db.queryForObject("SELECT aspect_ratio FROM creations WHERE job_id=?",
+                String.class, selected.generationJobId())).isEqualTo("1:1");
+        assertThat(store.get(request.id()).context().aspectRatio()).isNull();
+        assertThat(selections.start(subject, key, input).id()).isEqualTo(request.id());
+        generation.run(selected.generationJobId());
+        assertThat(promptCalls.get()).isEqualTo(1);
+        assertThat(imageCalls.get()).isEqualTo(1);
     }
 
     @Test void logoIsOptionalAndImageRendererReceivesProductPhotoWithoutInventingLogo() throws Exception {
         var id=runAd();assertThat(selections.status(subject,id).generationStatus()).isEqualTo("SUCCEEDED");
         var render=mapper.readTree(imageRequest.get());assertThat(render.path("images").size()).isEqualTo(1);
         assertThat(render.path("prompt").asText()).contains("There is no separate brand logo. Do not invent one.");
+    }
+
+    @Test void publishingDirectorTemplatePreservesQueuedJobsAndUsesNewVersionForNewRequests() throws Exception {
+        var kind=com.giraffix.prompt.PromptTemplates.Kind.DIRECTOR;
+        var original=templates.get("prompt-admin",kind);
+        var old=enqueue("before-template-edit");
+        var draft=templates.draft("prompt-admin",kind,original.content()+"\nADMIN TEMPLATE MARKER",original.version());
+        try{
+            templates.publish("prompt-admin",kind,draft.version(),original.version());
+            var current=enqueue("after-template-edit");
+            assertThat(store.get(old).directorPromptVersion()).isEqualTo(original.version());
+            assertThat(store.get(current).directorPromptVersion()).isEqualTo(draft.version());
+            selectionWorker.run(old);
+            var job=selections.status(subject,old).generationJobId();generation.run(job);
+            assertThat(selections.status(subject,old).generationStatus()).isEqualTo("SUCCEEDED");
+            assertThat(mapper.readTree(promptRequest.get()).path("system").asText()).doesNotContain("ADMIN TEMPLATE MARKER");
+            var brief=store.json.read(db.queryForObject("SELECT brief_json FROM generation_jobs WHERE id=?",String.class,job),Brief.class);
+            var result=writer.write(brief,400000,Instant.now().plusSeconds(90),draft.version());
+            assertThat(mapper.readTree(promptRequest.get()).path("system").asText()).contains("ADMIN TEMPLATE MARKER");
+            assertThat(result.version()).isEqualTo("creative-director-v2@"+draft.version());
+        }finally{
+            templates.publish("prompt-admin",kind,original.version(),templates.get("prompt-admin",kind).version());
+        }
     }
 
     @Test void repeatedOperationReturnsSameFlowAndRatioChangesConflict() throws Exception {

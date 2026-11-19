@@ -44,4 +44,45 @@ class SelectionAssetTests {
         assertThat(asset.key()).isEqualTo("creations/"+owner+"/"+job+"/output");assertThat(asset.sha256()).isEqualTo(JsonSupport.digest(bytes));
         verify(s3).putObject(argThat((PutObjectRequest request)->request.acl()==null && request.bucket().equals("private-test") && request.contentType().equals("image/png")),any(RequestBody.class));
     }
+
+    @Test void explicitAdCleanupRejectsOtherOwnersJobsBucketsAndProductPhotos(){
+        UUID owner=UUID.randomUUID(),job=UUID.randomUUID();
+        var storage=new GeneratedAssetStorage(s3,properties);
+        String expected="creations/"+owner+"/"+job+"/output";
+        for(var asset:java.util.List.of(new Asset("foreign",expected,"image/png",null),
+                new Asset("private-test","creations/"+UUID.randomUUID()+"/"+job+"/output","image/png",null),
+                new Asset("private-test","creations/"+owner+"/"+UUID.randomUUID()+"/output","image/png",null),
+                new Asset("private-test","products/"+UUID.randomUUID()+"/photo.png","image/png",null)))
+            assertThatThrownBy(()->storage.delete(owner,job,asset)).isInstanceOf(IllegalArgumentException.class);
+        verify(s3,never()).deleteObject(any(DeleteObjectRequest.class));
+    }
+
+    @Test void executionScopeReusesVerifiedBytesButNeverCachesAcrossJobs() throws Exception {
+        byte[] data=ProductImageProcessorTests.fixture("png");bytes(data);
+        var asset=new Asset("private-test","key","image/png",JsonSupport.digest(data));
+        try(var scope=assets.openScope()){
+            assertThat(assets.read(asset)).isEqualTo(data);
+            assertThat(assets.read(asset)).isEqualTo(data);
+            verify(s3,times(1)).getObject(any(GetObjectRequest.class));
+        }
+        bytes(ProductImageProcessorTests.fixture("jpeg"));
+        try(var scope=assets.openScope()){
+            assertThatThrownBy(()->assets.read(asset)).isInstanceOf(ResponseStatusException.class);
+        }
+        verify(s3,times(2)).getObject(any(GetObjectRequest.class));
+    }
+
+    @Test void fingerprintSeedsOnlyTheVerifiedHashAndUnhashedReadsRemainFresh() throws Exception {
+        byte[] data=ProductImageProcessorTests.fixture("png");bytes(data);
+        var raw=new Asset("private-test","key","image/png",null);
+        try(var scope=assets.openScope()){
+            var verified=assets.fingerprint(raw);
+            assets.read(verified);
+            verify(s3,times(1)).getObject(any(GetObjectRequest.class));
+            assets.read(raw);
+            verify(s3,times(2)).getObject(any(GetObjectRequest.class));
+            assertThatThrownBy(()->assets.read(new Asset("private-test","key","image/png","wrong-hash")))
+                    .isInstanceOf(ResponseStatusException.class);
+        }
+    }
 }

@@ -1,9 +1,7 @@
 package com.giraffix.generation;
 
-import com.giraffix.selection.SelectionContextService;
 import com.giraffix.selection.SelectionModels.Start;
 import com.giraffix.selection.SelectionService;
-import com.giraffix.selection.SelectionStore;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -17,17 +15,16 @@ import java.net.URI;
 import java.util.UUID;
 
 @RestController
+@io.swagger.v3.oas.annotations.tags.Tag(name="05 Ads")
 @RequestMapping("/api/v1/ads")
 public class AdController {
     private final SelectionService selections;
-    private final SelectionStore store;
-    private final SelectionContextService contexts;
+    private final AdStatusService statuses;
     private final ImageGenerator generator;
 
-    public AdController(SelectionService selections, SelectionStore store, SelectionContextService contexts, ImageGenerator generator) {
+    public AdController(SelectionService selections, AdStatusService statuses, ImageGenerator generator) {
         this.selections = selections;
-        this.store = store;
-        this.contexts = contexts;
+        this.statuses = statuses;
         this.generator = generator;
     }
 
@@ -50,29 +47,15 @@ public class AdController {
                                         @Valid @RequestBody Request request) {
         if (!generator.available()) throw new org.springframework.web.server.ResponseStatusException(
                 org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,"Configure the OpenAI image generation API key");
-        var selection = selections.start(user.getSubject(), key, new Start(request.productId(), request.intent(),
+        UUID selection = selections.startId(user.getSubject(), key, new Start(request.productId(), request.intent(),
                 "Advertisement composed for aspect ratio " + request.aspectRatio(), request.controls(), null, request.aspectRatio(), request.quality()));
-        return ResponseEntity.accepted().location(URI.create("/api/v1/ads/" + selection.id()))
-                .body(status(user.getSubject(), selection.id()));
+        return ResponseEntity.accepted().location(URI.create("/api/v1/ads/" + selection))
+                .body(statuses.get(user.getSubject(), selection));
     }
 
     @GetMapping("/{id}")
     public Status get(@AuthenticationPrincipal OidcUser user, @PathVariable UUID id) {
-        return status(user.getSubject(), id);
+        return statuses.get(user.getSubject(), id);
     }
 
-    private Status status(String subject, UUID id) {
-        var selected = selections.status(subject, id); // Includes account/product ownership checks.
-        var request = store.get(id);
-        var creations = store.db.query("SELECT id FROM creations WHERE job_id=? AND owner_id=?",
-                (r,n) -> r.getObject(1, UUID.class), selected.generationJobId(), contexts.owner(subject));
-        UUID creation = creations.isEmpty() ? null : creations.get(0);
-        String state = selected.generationStatus() == null ? selected.status() : selected.generationStatus();
-        var errors = store.db.query("SELECT failure_code,failure_stage,failure_message FROM generation_jobs WHERE id=? AND failure_code IS NOT NULL",
-                (r,n) -> new Error(r.getString(1),r.getString(2),r.getString(3)),selected.generationJobId());
-        return new Status(id, state, selected.status(), selected.generationJobId(), creation,
-                creation == null ? null : "/api/v1/creations/" + creation + "/image",
-                request.context().aspectRatio(), java.util.Objects.toString(request.context().quality(),"high"), selected.fallbackUsed(),
-                errors.isEmpty()?null:errors.get(0));
-    }
 }

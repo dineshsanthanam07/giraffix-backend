@@ -50,8 +50,8 @@ public class ProductImageService {
         log.info("stage=product_confirmation_received brandId={} imageCount={}", brandId, images == null ? 0 : images.size());
         // Confirmation supplies the user's edited details and the original selected files.
         List<Upload> prepared = prepare(images, 0, 0);
-        var created = productService.createProduct(googleId, brandId, request);
-        Product product = ownedProduct(googleId, created.id());
+        Product product=productService.newOwnedProduct(googleId,brandId,request);
+        products.save(product); // UUID is assigned without an initial flush and re-read.
         return save(product, prepared);
     }
 
@@ -63,8 +63,7 @@ public class ProductImageService {
     }
 
     private Product ownedProduct(String googleId, UUID productId) {
-        var user = users.getUserByGoogleId(googleId);
-        return products.findByIdAndBrand_CreatedBy_Id(productId, user.getId())
+        return products.findOwnedForUpdate(productId,googleId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Product not found"));
     }
 
@@ -110,12 +109,21 @@ public class ProductImageService {
     }
 
     private ProductResponse save(Product product, List<Upload> uploads) {
+        List<String> uploaded=new ArrayList<>();
+        // One compensation callback covers partial upload and commit-time rollback.
+        org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization(){
+                    @Override public void afterCompletion(int status){
+                        if(status==STATUS_ROLLED_BACK && !uploaded.isEmpty())storage.cleanupProductImages(product.getId(),uploaded);
+                    }
+                });
         for (Upload upload : uploads) {
             String url = storage.upload(product.getId(), upload.image().mediaType(), upload.image().bytes());
+            uploaded.add(url);
             product.addImage(upload.filename(), upload.image().mediaType(), upload.image().bytes().length,
                     url);
         }
-        products.saveAndFlush(product);
+        products.flush();
         log.info("stage=product_metadata_flushed productId={} addedCount={} totalCount={} storage=s3",
                 product.getId(), uploads.size(), product.getImages().size());
         return ProductResponse.from(product);

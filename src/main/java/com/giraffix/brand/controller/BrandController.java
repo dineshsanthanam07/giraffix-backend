@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.UUID;
 
 @RestController
+@io.swagger.v3.oas.annotations.tags.Tag(name="03 Brands")
 @RequestMapping("/api/v1/brands")
 public class BrandController {
 
@@ -39,9 +40,9 @@ public class BrandController {
 
     @GetMapping
     public List<BrandResponse> getAll(
-            @AuthenticationPrincipal OidcUser user) {
+            @AuthenticationPrincipal OidcUser user,@RequestParam(defaultValue="0") int page,@RequestParam(defaultValue="20") int size) {
 
-        return brandService.getMyBrands(user.getSubject());
+        return brandService.getMyBrands(user.getSubject(),page,size);
     }
 
     @GetMapping("/{brandId}")

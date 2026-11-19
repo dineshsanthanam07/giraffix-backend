@@ -118,6 +118,17 @@ class ConceptAnalysisTests {
         return mapper.writeValueAsString(java.util.Map.of("stop_reason", stop,
                 "content", java.util.List.of(java.util.Map.of("type", "text", "text", json))));
     }
+
+    @Test void usesPublishedConceptInstructionsWithoutChangingResponseContract(){
+        var templates=org.mockito.Mockito.mock(com.giraffix.prompt.PromptTemplates.class);
+        var kind=com.giraffix.prompt.PromptTemplates.Kind.CONCEPT;
+        org.mockito.Mockito.when(templates.current(kind)).thenReturn(new com.giraffix.prompt.PromptTemplates.Revision(kind.key,2,"ADMIN CONCEPT INSTRUCTIONS","admin",java.time.Instant.now()));
+        org.springframework.test.util.ReflectionTestUtils.setField(analyzer,"templates",templates);
+        server.expect(requestTo("https://example.invalid/v1/messages"))
+                .andExpect(jsonPath("$.messages[0].content[1].text").value("ADMIN CONCEPT INSTRUCTIONS"))
+                .andRespond(withSuccess(envelope(ConceptFixtures.VALID,"end_turn"),MediaType.APPLICATION_JSON));
+        assertThat(analyzer.analyze(new byte[]{1},"image/png").usable()).isTrue();server.verify();
+    }
     private void assertBadGateway(org.assertj.core.api.ThrowableAssert.ThrowingCallable action) {
         assertThatThrownBy(action).isInstanceOfSatisfying(ResponseStatusException.class,
                 ex -> assertThat(ex.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY));

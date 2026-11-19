@@ -56,11 +56,16 @@ public class BrandService {
 
     @Transactional(readOnly = true)
     public List<BrandResponse> getMyBrands(String googleId) {
+        return getMyBrands(googleId,0,20);
+    }
+    @Transactional(readOnly=true)
+    public List<BrandResponse> getMyBrands(String googleId,int page,int size){
+        var pageable=com.giraffix.shared.Pages.of(page,size);
 
         User user = userService.getUserByGoogleId(googleId);
 
         return brandRepository
-                .findAllByCreatedBy_IdOrderByCreatedAtDesc(user.getId())
+                .findAllByCreatedBy_IdOrderByCreatedAtDescIdDesc(user.getId(),pageable)
                 .stream()
                 .map(BrandResponse::from)
                 .toList();

@@ -31,6 +31,8 @@ public class ClaudeConceptAnalyzer implements ConceptAnalyzer {
     private final ObjectMapper mapper;
     private final ConceptAnalysisValidator validator;
     private final String prompt;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.giraffix.prompt.PromptTemplates templates;
     private final int maxTokens;
 
     public ClaudeConceptAnalyzer(RestClient.Builder builder, ClaudeProperties properties, ObjectMapper mapper,
@@ -52,6 +54,7 @@ public class ClaudeConceptAnalyzer implements ConceptAnalyzer {
 
     @Override
     public ConceptAnalysis analyze(byte[] image, String mediaType) {
+        String prompt=templates==null?this.prompt:templates.current(com.giraffix.prompt.PromptTemplates.Kind.CONCEPT).content();
         var body = Map.of("model", model, "max_tokens", maxTokens,
                 "output_config", Map.of("format", Map.of("type", "json_schema", "schema", validator.providerSchema())),
                 "messages", List.of(Map.of("role", "user", "content", List.of(
@@ -61,15 +64,19 @@ public class ClaudeConceptAnalyzer implements ConceptAnalyzer {
         String response;
         log.info("stage=concept_model_started model={}", model);
         try {
+            com.giraffix.usage.UsageService.providerStarted(model);
             response = client.post().uri("/messages").contentType(MediaType.APPLICATION_JSON).body(body)
                     .retrieve().body(String.class);
         } catch (RestClientException ex) {
+            if(ex instanceof RestClientResponseException http)com.giraffix.usage.UsageService.providerRejected(http.getStatusCode().value());
             log.error("stage=concept_model_failed errorType={} status={}", ex.getClass().getSimpleName(),
                     ex instanceof RestClientResponseException http ? http.getStatusCode().value() : 0);
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Concept analysis provider failed");
         }
         try {
             var root = mapper.readTree(response == null ? "" : response);
+            if(root!=null)com.giraffix.usage.UsageService.providerUsage(model,root.path("id").asText(null),
+                    root.path("usage").path("input_tokens").asLong(-1),root.path("usage").path("output_tokens").asLong(-1));
             if (!"end_turn".equals(root.path("stop_reason").asText()) || !root.path("content").isArray()) {
                 throw new IllegalArgumentException("Incomplete concept analysis");
             }

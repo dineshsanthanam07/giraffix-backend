@@ -13,8 +13,8 @@ import java.util.UUID;
 public interface BrandRepository
         extends JpaRepository<Brand, UUID> {
 
-    List<Brand> findAllByCreatedBy_IdOrderByCreatedAtDesc(
-            UUID userId
+    List<Brand> findAllByCreatedBy_IdOrderByCreatedAtDescIdDesc(
+            UUID userId, org.springframework.data.domain.Pageable pageable
     );
 
     Optional<Brand> findByIdAndCreatedBy_Id(

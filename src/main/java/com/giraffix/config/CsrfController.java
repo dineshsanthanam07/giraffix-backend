@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Map;
 
 @RestController
+@io.swagger.v3.oas.annotations.tags.Tag(name="02 Security")
 public class CsrfController {
 
     @GetMapping("/api/v1/security/csrf")

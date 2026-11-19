@@ -53,8 +53,16 @@ class ProductAnalysisTests {
                         "test-model", "2023-06-01", 1024, 5242880), builder,
                 new ClassPathResource("prompts/product-analysis.txt"),
                 new ClassPathResource("schemas/product-visual-extraction.json"),
-                mock(com.giraffix.product.service.S3ImageStorage.class));
-        mvc = MockMvcBuilders.standaloneSetup(new ProductController(service)).build();
+                mock(com.giraffix.product.service.ProductImageDeletionQueue.class));
+        var usage=mock(com.giraffix.usage.UsageService.class);
+        when(usage.execute(anyString(),any(),any())).thenAnswer(call->((java.util.function.Supplier<?>)call.getArgument(2)).get());
+        var user=mock(org.springframework.security.oauth2.core.oidc.user.OidcUser.class);when(user.getSubject()).thenReturn("analysis-owner");
+        mvc = MockMvcBuilders.standaloneSetup(new ProductController(service,usage))
+                .setCustomArgumentResolvers(new org.springframework.web.method.support.HandlerMethodArgumentResolver(){
+                    public boolean supportsParameter(org.springframework.core.MethodParameter p){return p.getParameterType()==org.springframework.security.oauth2.core.oidc.user.OidcUser.class;}
+                    public Object resolveArgument(org.springframework.core.MethodParameter p,org.springframework.web.method.support.ModelAndViewContainer m,
+                            org.springframework.web.context.request.NativeWebRequest r,org.springframework.web.bind.support.WebDataBinderFactory f){return user;}
+                }).build();
     }
 
     @Test
@@ -267,6 +275,18 @@ class ProductAnalysisTests {
     private String envelope(String extraction) {
         return mapper.writeValueAsString(Map.of("stop_reason", "end_turn", "content",
                 List.of(Map.of("type", "text", "text", extraction))));
+    }
+
+    @Test void usesPublishedProductInstructionsWithoutChangingOutputSchema() {
+        var templates=mock(com.giraffix.prompt.PromptTemplates.class);
+        var kind=com.giraffix.prompt.PromptTemplates.Kind.PRODUCT;
+        when(templates.current(kind)).thenReturn(new com.giraffix.prompt.PromptTemplates.Revision(kind.key,2,"ADMIN PRODUCT INSTRUCTIONS","admin",java.time.Instant.now()));
+        org.springframework.test.util.ReflectionTestUtils.setField(service,"prompts",templates);
+        server.expect(requestTo("https://example.invalid/v1/messages"))
+                .andExpect(jsonPath("$.messages[0].content[1].text").value("ADMIN PRODUCT INSTRUCTIONS"))
+                .andExpect(jsonPath("$.output_config.format.schema.additionalProperties").value(false))
+                .andRespond(withSuccess(envelope("{\"name\":null,\"category\":null,\"description\":null,\"keyFeatures\":null,\"targetAudience\":null,\"imageUrl\":null}"),MediaType.APPLICATION_JSON));
+        service.analyzeProduct(image());server.verify();
     }
 
     private MockMultipartFile image() {

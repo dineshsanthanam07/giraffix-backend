@@ -61,7 +61,9 @@ class ConceptPersistenceTests {
         when(analyzer.analyze(any(byte[].class), anyString())).thenReturn(ConceptFixtures.analysis());
         OidcUser principal = mock(OidcUser.class);
         when(principal.getSubject()).thenReturn("concept-admin");
-        mvc = MockMvcBuilders.standaloneSetup(new ConceptController(service))
+        var usage=mock(com.giraffix.usage.UsageService.class);
+        when(usage.execute(anyString(),any(),any())).thenAnswer(call->((java.util.function.Supplier<?>)call.getArgument(2)).get());
+        mvc = MockMvcBuilders.standaloneSetup(new ConceptController(service,usage))
                 .setCustomArgumentResolvers(new HandlerMethodArgumentResolver() {
                     public boolean supportsParameter(MethodParameter p) { return p.getParameterType() == OidcUser.class; }
                     public Object resolveArgument(MethodParameter p, ModelAndViewContainer c,

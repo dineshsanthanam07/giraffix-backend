@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
+@io.swagger.v3.oas.annotations.tags.Tag(name="01 Identity")
 @RequestMapping("/api/v1/users")
 public class AuthController {
     private final UserService userService;

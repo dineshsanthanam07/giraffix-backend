@@ -22,7 +22,7 @@ class SelectionMigrationTests {
                 VALUES(?,'original-bucket','original-key','https://original/url','original.png','image/png',123,TRUE,?,1,'original-user',CURRENT_TIMESTAMP)
                 """)){stmt.setObject(1,id);stmt.setString(2,ConceptFixtures.VALID);stmt.executeUpdate();}
         }
-        assertThat(Flyway.configure().dataSource(url,user,"").schemas(schema).defaultSchema(schema).load().migrate().migrationsExecuted).isEqualTo(7);
+        assertThat(Flyway.configure().dataSource(url,user,"").schemas(schema).defaultSchema(schema).load().migrate().migrationsExecuted).isEqualTo(13);
         try(var connection=DriverManager.getConnection(url,user,"")){
             connection.setSchema(schema);
             try(var stmt=connection.createStatement();var row=stmt.executeQuery("SELECT c.id,c.image_bucket,c.image_key,r.id,r.analysis_json,r.status FROM concepts c JOIN concept_revisions r ON r.concept_id=c.id")){

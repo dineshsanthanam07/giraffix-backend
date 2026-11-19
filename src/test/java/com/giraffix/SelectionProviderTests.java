@@ -109,6 +109,24 @@ class SelectionProviderTests {
         assertThat(result.notSuitableConceptIds()).containsExactly(candidate.conceptId());
         assertThat(json.mapper.readTree(request.get()).path("system").asText()).contains("Configured minimum compatibility score: 90");
     }
+    @Test void pickerUsesPinnedTemplateRevisionAndSeparatesAttemptHashes(){
+        policy.pickerEnabled=true;
+        var old=policy.snapshot();
+        var templates=mock(com.giraffix.prompt.PromptTemplates.class);
+        var kind=com.giraffix.prompt.PromptTemplates.Kind.PICKER;
+        var first=new com.giraffix.prompt.PromptTemplates.Revision(kind.key,1,"Original picker {{MINIMUM_COMPATIBILITY_SCORE}}","system",java.time.Instant.now());
+        var second=new com.giraffix.prompt.PromptTemplates.Revision(kind.key,2,"Updated picker {{MINIMUM_COMPATIBILITY_SCORE}}","admin",java.time.Instant.now());
+        when(templates.version(kind,1)).thenReturn(first);when(templates.version(kind,2)).thenReturn(second);when(templates.current(kind)).thenReturn(second);
+        adapter.setTemplates(templates);
+        org.springframework.test.util.ReflectionTestUtils.setField(policy,"prompts",templates);
+        var current=policy.snapshot();
+        assertThat(json.hash(current)).isNotEqualTo(json.hash(old));
+        response.set(envelope(pickerBody(85,"STRONG",List.of()),"end_turn"));
+        adapter.evaluate(context,List.of(candidate),null,old);
+        assertThat(json.mapper.readTree(request.get()).path("system").asText()).isEqualTo("Original picker 80");
+        adapter.evaluate(context,List.of(candidate),null,current);
+        assertThat(json.mapper.readTree(request.get()).path("system").asText()).isEqualTo("Updated picker 80");
+    }
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings={"extra","missing","decimal","outOfRange","classification","unknownId","duplicate","missingExclusion","extraExclusion","duplicateExclusion","blankAdaptation"})
     void pickerRejectsMalformedOrContradictoryResults(String mutation) {

@@ -6,6 +6,34 @@ prompt with Claude, renders with OpenAI `gpt-image-2` directly, reviews the outp
 and saves the image in S3 with its metadata and prompt in PostgreSQL.
 Start with `POST /api/v1/ads`; poll the returned Location for the final image URL.
 
+For live stage updates, connect `EventSource` to
+`GET /api/v1/ads/{operationId}/events` using the same login session. It emits
+authorized `progress` events through matching, prompting, rendering, and review,
+then returns the final image URL on success. See [live ad progress](docs/ad-progress.md)
+for frontend code, reconnect/error handling, limits, and proxy configuration.
+
+Saved ads survive product deletion and remain accessible to their original owner.
+Use `GET /api/v1/ads` with optional `productId`/`brandId` filters, and
+`GET /api/v1/ads/saved/{creationId}` for details. Explicitly delete an ad with
+`DELETE /api/v1/ads/saved/{creationId}`; this queues only that generated image for
+cleanup. Restart to apply Flyway V16. See [saved ads](docs/saved-ads.md) for IDs,
+image reads, migration behavior, and deletion semantics.
+
+The [durable pipeline](docs/pipeline.md) reuses completed provider stages, checkpoints
+output reviews, bounds worker concurrency, and reduces database polling and repeated
+asset downloads. Restart the backend to apply Flyway V12 after this update.
+
+Admins can edit and publish versioned prompt templates at `/admin/prompts`; see
+[admin prompt editor](docs/admin-prompts.md). Flyway V13/V14 add revision storage
+and PostgreSQL publication notifications. Runtime prompts are cached without a
+timer; publication invalidates replicas instead of querying the DB per generation.
+
+Admins can view token, model, user, daily, and operation analytics at `/admin/usage`.
+The read-only `/api/v1/admin/usage` APIs support user/product/brand/date filters.
+Flyway V17 adds usage tracking and adopts historical ad records on startup.
+This introduces no usage or spending limits. See [usage analytics](docs/usage-analytics.md)
+for coverage, token completeness, and estimated-cost interpretation.
+
 The ad request accepts product ID, ratio, and quality together:
 
 ```json
@@ -67,6 +95,10 @@ For an existing database previously managed by Hibernate:
 Never edit an applied migration; add V2, V3, etc. for later changes.
 
 ## API
+
+See the [API inventory and operating guide](docs/api-and-operations.md) for route
+groups, pagination, legacy opt-in, query/storage changes and diagnostics. Brand and
+product lists now default to 20 rows; request subsequent pages explicitly.
 
 All `/api/v1/**` routes require a session. Send the session cookie on requests.
 After login, GET `/api/v1/security/csrf` and send its returned header name and token
@@ -205,14 +237,17 @@ product-level `imageUrl` property remains available for legacy external URLs.
 
 To add images later, POST multipart `images` files to `/api/v1/products/{id}/images`.
 The stored collection is limited to five images and 20 MB total (5 MB per file).
-Text PATCH requests preserve image URLs. Deleting a product first deletes its stored
-S3 images, then deletes the product and database image rows. Another user's product returns 404.
-S3 failures return 502 and retain the database records so the caller can retry DELETE.
-Some objects may already have been removed when a later deletion fails; retries safely
-delete already-missing keys. A missing S3 bucket configuration returns 503 for products
-with stored images. Legacy external `imageUrl` values are never deleted.
-S3 and PostgreSQL do not share a transaction: a database failure after S3 cleanup can
-leave a retained product with missing images; retry DELETE to finish removing it.
+Text PATCH requests preserve image URLs. Deleting a product commits the product/image-row
+removal and durable S3 cleanup records together. HTTP 204 confirms this database commit;
+the background worker removes S3 photos afterward. Another user's product returns 404.
+A failed database commit leaves the product and photos intact. S3 outages do not fail
+an already-committed DELETE: cleanup retries automatically with backoff, including after
+a backend restart. A missing S3 bucket configuration returns 503 before deletion for
+products with stored images. Legacy external `imageUrl` values are never deleted.
+Flyway V15 creates `product_image_deletions` on the next startup. Cleanup polls every
+five seconds using its own scheduler, claims objects with a two-minute lease, and retries
+failures from 30 seconds up to one hour apart. Successful cleanup removes its queue row.
+See [product deletion](docs/product-deletion.md) for configuration and diagnostics.
 With S3 versioning enabled, deletion creates delete markers; older versions remain
 subject to the bucket's lifecycle policy.
 
@@ -221,8 +256,9 @@ Restart the backend to apply Flyway V3. It adds only `storage_url` and allows NU
 untouched; there is no automatic conversion or legacy-download fallback. No additional
 schema migration is needed for this simplification.
 
-If an upload fails, the database save rolls back. S3 uploads already completed are
-left in the bucket; this simple flow has no automatic cleanup or background workers.
+If an upload fails, the database save rolls back and best-effort compensation removes
+that operation's uploaded objects. Upload compensation remains separate from the durable
+product-deletion queue; process interruption during upload can still leave an orphan.
 
 ## S3 setup
 
@@ -253,7 +289,7 @@ does not itself provide a public download URL. See [AWS S3 Java examples](https:
 ## Image analysis logs
 
 Analysis logs appear in the console and `logs/giraffix.log` (rolling files: 10 MB,
-7 days, 100 MB total). Each HTTP request receives an `X-Request-ID` response header;
+7 days, 100 MB total). Each API request receives an `X-Request-ID` response header;
 search for the same `analysisId` or `[requestId:...]` in the logs to follow it end to end.
 Request IDs also cover product confirmation, image attachments and product deletion.
 
@@ -269,9 +305,9 @@ The final HTTP 201 response confirms a successful product creation. `s3_upload_f
 includes the provider HTTP status. `analysis_suggestions_returned persistence=none`
 confirms that analysis did not save anything.
 
-ProductService DEBUG logging is enabled for resource metadata and bounded extracted
-field values. Set `logging.level.com.giraffix.product.service.ProductService=INFO`
-to omit those details. API keys, cookies, CSRF tokens, image bytes/base64, request
+Diagnostics default to INFO. Set `GIRAFFIX_LOG_LEVEL=DEBUG` to enable resource,
+field-size and request diagnostics; extracted field values are not logged.
+Successful GET/poll completion logs are DEBUG. API keys, cookies, CSRF tokens, image bytes/base64, request
 bodies, and raw provider error bodies are not logged.
 
 ## Concept reference library

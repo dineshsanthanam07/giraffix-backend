@@ -15,6 +15,8 @@ import java.util.UUID;
 import static com.giraffix.selection.SelectionModels.*;
 
 @RestController
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="giraffix.api.legacy-selection-enabled",havingValue="true")
+@io.swagger.v3.oas.annotations.tags.Tag(name="90 Legacy - Selection")
 @RequestMapping("/api/v1/selection-requests")
 public class SelectionController {
     private final SelectionService service;
@@ -23,7 +25,7 @@ public class SelectionController {
     public SelectionController(SelectionService service,JsonSupport json,Validator validator){this.service=service;this.json=json;this.validator=validator;}
     @PostMapping
     @Operation(summary="Select an advertising concept for a product",
-            description="Only productId is required. Loads the saved product, photos and brand; omitted intent and format use defaults. Returns HTTP 202; poll the Location URL for the result.",
+            description="Only productId is required. Loads the saved product, photos and brand; omitted intent and format use defaults. Generation defaults to a 1:1 square image when aspectRatio is omitted. Returns HTTP 202; poll the Location URL for the result.",
             requestBody=@io.swagger.v3.oas.annotations.parameters.RequestBody(required=true,
                     content=@Content(mediaType="application/json",schema=@Schema(implementation=Start.class),
                             examples=@ExampleObject(name="automaticSelection",summary="Pick a concept automatically",

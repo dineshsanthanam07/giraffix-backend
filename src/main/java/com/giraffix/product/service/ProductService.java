@@ -49,7 +49,9 @@ public class ProductService {
     private final RestClient restClient;
     private final Resource productAnalysisPrompt;
     private final Resource productAnalysisSchema;
-    private final S3ImageStorage storage;
+    private final ProductImageDeletionQueue deletions;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.giraffix.prompt.PromptTemplates prompts;
     @Value("${giraffix.ai.max-images:5}")
     private int maxImages = 5;
     @Value("${giraffix.ai.max-total-image-size-bytes:20971520}")
@@ -66,7 +68,7 @@ public class ProductService {
             Resource productAnalysisPrompt,
             @Value("classpath:schemas/product-visual-extraction.json")
             Resource productAnalysisSchema,
-            S3ImageStorage storage) {
+            ProductImageDeletionQueue deletions) {
 
         this.productRepository = productRepository;
         this.brandRepository = brandRepository;
@@ -75,7 +77,7 @@ public class ProductService {
         this.claudeProperties = claudeProperties;
         this.productAnalysisPrompt = productAnalysisPrompt;
         this.productAnalysisSchema = productAnalysisSchema;
-        this.storage = storage;
+        this.deletions = deletions;
 
         this.restClient = restClientBuilder.clone()
                 .baseUrl(claudeProperties.baseUrl())
@@ -164,14 +166,11 @@ public class ProductService {
         String prompt;
         JsonNode schema;
 
-        try (var inputStream =
-                     productAnalysisPrompt.getInputStream();
-             var schemaStream = productAnalysisSchema.getInputStream()) {
-
-            prompt = new String(
-                    inputStream.readAllBytes(),
-                    StandardCharsets.UTF_8
-            );
+        try (var schemaStream = productAnalysisSchema.getInputStream()) {
+            if(prompts!=null)prompt=prompts.current(com.giraffix.prompt.PromptTemplates.Kind.PRODUCT).content();
+            else try(var inputStream=productAnalysisPrompt.getInputStream()){
+                prompt=new String(inputStream.readAllBytes(),StandardCharsets.UTF_8);
+            }
             schema = objectMapper.readTree(schemaStream);
 
         } catch (IOException | JacksonException ex) {
@@ -207,6 +206,7 @@ public class ProductService {
                 analysisId, claudeProperties.baseUrl(), claudeProperties.model(), claudeProperties.maxTokens(),
                 images.size(), preparedBytes, claudeProperties.apiVersion());
         try {
+            com.giraffix.usage.UsageService.providerStarted(claudeProperties.model());
             var apiResponse = restClient.post()
                     .uri("/messages")
                     .contentType(MediaType.APPLICATION_JSON)
@@ -219,6 +219,7 @@ public class ProductService {
                     safeLog(apiResponse.getHeaders().getFirst("request-id")), elapsed(apiStarted),
                     response == null ? 0 : response.length());
         } catch (RestClientResponseException ex) {
+            com.giraffix.usage.UsageService.providerRejected(ex.getStatusCode().value());
             log.error("analysisId={} stage=model_api_http_error status={} providerRequestId={} durationMs={}",
                     analysisId, ex.getStatusCode().value(), ex.getResponseHeaders() == null ? "none" :
                             safeLog(ex.getResponseHeaders().getFirst("request-id")), elapsed(apiStarted));
@@ -242,6 +243,8 @@ public class ProductService {
         }
         try {
             JsonNode root = objectMapper.readTree(response);
+            com.giraffix.usage.UsageService.providerUsage(claudeProperties.model(),root.path("id").asText(null),
+                    root.path("usage").path("input_tokens").asLong(-1),root.path("usage").path("output_tokens").asLong(-1));
             log.info("analysisId={} stage=model_response_parsed messageId={} model={} stopReason={} inputTokens={} outputTokens={}",
                     analysisId, safeLog(root.path("id").asText()), safeLog(root.path("model").asText()),
                     safeLog(root.path("stop_reason").asText()), root.path("usage").path("input_tokens").asInt(0),
@@ -293,8 +296,8 @@ public class ProductService {
                 if (!extraction.path(field).isNull()) {
                     populated.add(field);
                     if (!"imageUrl".equals(field)) {
-                        log.debug("analysisId={} stage=extracted_field field={} value={}",
-                                analysisId, field, safeLog(extraction.path(field).asText()));
+                        log.debug("analysisId={} stage=extracted_field field={} valueChars={}",
+                                analysisId,field,extraction.path(field).asText().length());
                     }
                 }
             }
@@ -371,6 +374,9 @@ public class ProductService {
             String googleId,
             UUID brandId,
             ProductRequest request) {
+        return ProductResponse.from(productRepository.saveAndFlush(newOwnedProduct(googleId,brandId,request)));
+    }
+    Product newOwnedProduct(String googleId,UUID brandId,ProductRequest request){
 
         User user = userService.getUserByGoogleId(googleId);
 
@@ -390,9 +396,7 @@ public class ProductService {
         product.setTargetAudience(request.targetAudience());
         product.setImageUrl(request.imageUrl());
 
-        return ProductResponse.from(
-                productRepository.saveAndFlush(product)
-        );
+        return product;
     }
 
     // ========================================
@@ -403,6 +407,11 @@ public class ProductService {
     public List<ProductResponse> getBrandProducts(
             String googleId,
             UUID brandId) {
+        return getBrandProducts(googleId,brandId,0,20);
+    }
+    @Transactional(readOnly=true)
+    public List<ProductResponse> getBrandProducts(String googleId,UUID brandId,int page,int size){
+        var pageable=com.giraffix.shared.Pages.of(page,size);
 
         User user = userService.getUserByGoogleId(googleId);
 
@@ -414,7 +423,7 @@ public class ProductService {
                 ));
 
         return productRepository
-                .findAllByBrand_IdOrderByCreatedAtDesc(brandId)
+                .findAllByBrand_IdOrderByCreatedAtDescIdDesc(brandId,pageable)
                 .stream()
                 .map(ProductResponse::from)
                 .toList();
@@ -428,12 +437,8 @@ public class ProductService {
     public ProductResponse getProduct(
             String googleId,
             UUID productId) {
-
-        User user = userService.getUserByGoogleId(googleId);
-
-        return ProductResponse.from(
-                findOwnedProduct(productId, user.getId())
-        );
+        return ProductResponse.from(productRepository.findByIdAndBrand_CreatedBy_GoogleId(productId,googleId)
+                .orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Product not found")));
     }
 
     // ========================================
@@ -446,11 +451,7 @@ public class ProductService {
             UUID productId,
             ProductRequest request) {
 
-        User user = userService.getUserByGoogleId(googleId);
-
-        Product product = findOwnedProduct(
-                productId, user.getId()
-        );
+        Product product=findOwnedProduct(productId,googleId);
 
         if (request.name() != null) {
             if (request.name().isBlank()) {
@@ -498,17 +499,13 @@ public class ProductService {
             String googleId,
             UUID productId) {
 
-        User user = userService.getUserByGoogleId(googleId);
+        Product product=findOwnedProduct(productId,googleId);
 
-        Product product = findOwnedProduct(
-                productId, user.getId()
-        );
-
-        storage.deleteProductImages(productId,
+        deletions.enqueue(productId,
                 product.getImages().stream().map(image -> image.getStorageUrl()).toList());
         productRepository.delete(product);
         productRepository.flush();
-        log.info("stage=product_deleted productId={}", productId);
+        log.info("stage=product_deletion_staged productId={} storageCleanup=durable_queue", productId);
     }
 
     // ========================================
@@ -517,10 +514,10 @@ public class ProductService {
 
     private Product findOwnedProduct(
             UUID productId,
-            UUID userId) {
+            String subject) {
 
         return productRepository
-                .findByIdAndBrand_CreatedBy_Id(productId, userId)
+                .findOwnedForUpdate(productId,subject)
                 .orElseThrow(() -> new ResponseStatusException(
                         HttpStatus.NOT_FOUND,
                         "Product not found"

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Prompt studio · Giraffix Admin</title>
+  <style>
+    :root{color-scheme:light;--ink:#182b24;--muted:#63746b;--line:#dbe3dd;--green:#1d6346;--paper:#fff;--bg:#f3f6f2}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,sans-serif}
+    header{padding:20px 32px;background:#163f2f;color:white;display:flex;align-items:center;justify-content:space-between}
+    header strong{letter-spacing:.08em}header span{font-size:13px;opacity:.8}main{max-width:1440px;margin:32px auto;padding:0 24px}
+    h1{font-size:30px;margin:0 0 6px}p{margin:0 0 20px;color:var(--muted)}.layout{display:grid;grid-template-columns:230px minmax(0,1fr);gap:24px}
+    .panel{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:22px}label,.eyebrow{display:block;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;color:var(--muted)}
+    select,textarea,button{font:inherit}select{width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;background:white}
+    textarea{display:block;width:100%;min-height:560px;resize:vertical;padding:18px;border:1px solid var(--line);border-radius:8px;font:13px/1.65 ui-monospace,Consolas,monospace;color:var(--ink);tab-size:2}
+    textarea:focus,select:focus{outline:2px solid #5ba67c;outline-offset:2px}button{border:1px solid var(--line);border-radius:6px;padding:9px 14px;background:white;color:var(--ink);cursor:pointer}button.primary{background:var(--green);border-color:var(--green);color:white}button:disabled{opacity:.45;cursor:default}
+    .toolbar,.meta,.history-row{display:flex;align-items:center;justify-content:space-between;gap:12px}.toolbar{flex-wrap:wrap;margin-bottom:16px}.actions{display:flex;gap:8px}.meta{font-size:12px;color:var(--muted);margin:10px 0 18px}.badge{font-size:12px;padding:4px 9px;background:#e4f1e8;border-radius:20px;color:var(--green)}
+    #message{padding:12px 16px;margin:0 0 18px;border:1px solid var(--line);background:#fff;border-radius:8px;white-space:pre-wrap}#message:empty{display:none}#message.error{color:#9c2929;background:#fff2f0;border-color:#e7c2bd}
+    .note{font-size:13px;margin-top:20px}.history-row{padding:11px 0;border-top:1px solid var(--line)}.history-row small{display:block;color:var(--muted);overflow-wrap:anywhere}.history-row button{white-space:nowrap}h2{font-size:16px;margin:24px 0 12px}.pager{display:flex;gap:8px;margin-top:12px}.history-row.active strong{color:var(--green)}
+    @media(max-width:800px){.layout{grid-template-columns:1fr}header{padding:18px 24px}main{margin:22px auto}textarea{min-height:440px}.panel{padding:16px}}
+  </style>
+</head>
+<body>
+<header><strong>GIRAFFIX</strong><span>Admin / Prompt studio</span></header>
+<main>
+  <h1>Shape the direction.</h1>
+  <p>Edit reusable pipeline instructions. Save a draft, review it, then publish it for new work.</p>
+  <div id="message" role="status" aria-live="polite"></div>
+  <div class="layout">
+    <aside class="panel">
+      <label for="template">Pipeline prompt</label><select id="template" disabled></select>
+      <p class="note">Publishing changes the selected template. Jobs already submitted keep their saved prompt versions.</p>
+      <p class="note" id="placeholder"></p>
+      <h2>Version history</h2><div id="history"></div>
+      <div class="pager"><button id="previous" disabled>Previous</button><button id="next" disabled>Next</button></div>
+      <p class="note">Load an earlier version and publish it to roll back. Viewing and saving prompts make no LLM calls.</p>
+    </aside>
+    <section class="panel" aria-label="Prompt editor">
+      <div class="toolbar"><div><span class="eyebrow" id="title">Prompt template</span><span class="badge" id="active">Loading…</span></div>
+        <div class="actions"><button id="reload" disabled>Reload active</button><button id="save" disabled>Save draft</button><button class="primary" id="publish" disabled>Publish</button></div>
+      </div>
+      <label for="content">Instructions</label><textarea id="content" spellcheck="false" maxlength="60000" disabled></textarea>
+      <div class="meta"><span id="editing"></span><span id="count">0 / 60,000 characters</span></div>
+      <p class="note">Output JSON schemas, model settings, product facts, and photos are managed separately. Keep instructions compatible with the existing stage contract.</p>
+    </section>
+  </div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const root = location.pathname.replace(/\/admin\/prompts\/?$/, '');
+  const base = '/api/v1/admin/prompts';
+  let key = '', active = 0, version = 0, original = '', busy = true, page = 0, historyCount = 0;
+  const dirty = () => $('content').value !== original;
+  function message(text, error = false) { $('message').textContent = text; $('message').className = error ? 'error' : ''; }
+  function controls() {
+    $('template').disabled = busy; $('content').disabled = busy;
+    $('save').disabled = busy || !dirty() || !$('content').value.trim();
+    $('publish').disabled = busy || dirty() || !version || version === active;
+    $('reload').disabled = busy; $('previous').disabled = busy || page === 0; $('next').disabled = busy || historyCount < 20;
+    $('publish').textContent = version && version !== active ? `Publish v${version}` : 'Publish';
+    $('editing').textContent = version ? `Editing v${version}${dirty() ? ' · Unsaved changes' : version === active ? ' · Active' : ' · Not active'}` : '';
+    $('count').textContent = `${$('content').value.length.toLocaleString()} / 60,000 characters`;
+    document.querySelectorAll('#history button').forEach(button => { button.disabled = busy; });
+  }
+  async function request(path, body) {
+    const options = { credentials: 'same-origin', headers: { Accept: 'application/json' }, cache: 'no-store' };
+    if (body !== undefined) {
+      const csrfResponse = await fetch(root + '/api/v1/security/csrf', options);
+      if (!csrfResponse.ok) throw new Error('Your session expired. Sign in again before saving.');
+      const csrf = await csrfResponse.json();
+      options.method = 'POST'; options.headers['Content-Type'] = 'application/json'; options.headers[csrf.headerName] = csrf.token;
+      options.body = JSON.stringify(body);
+    }
+    const response = await fetch(root + path, options);
+    if (!response.ok) {
+      if (response.status === 401 || response.redirected) throw new Error('Sign in with your administrator account.');
+      if (response.status === 403) throw new Error('Prompt editing requires a configured administrator.');
+      if (response.status === 409) throw new Error('Another administrator changed the active prompt. Your text is preserved; copy it before reloading the active version.');
+      if (response.status === 400) throw new Error('Invalid prompt. Use 1–60,000 characters, preserve the required picker placeholder, and remove unsupported {{placeholders}}.');
+      throw new Error(`Request failed (${response.status}). Your text has been preserved.`);
+    }
+    return response.json();
+  }
+  async function action(task) {
+    if (busy) return;
+    busy = true; controls();
+    try { await task(); } catch (error) { message(error.message, true); }
+    finally { busy = false; controls(); }
+  }
+  function show(revision) {
+    version = revision.version; original = revision.content; $('content').value = original;
+    $('active').textContent = `Active v${active}`;
+  }
+  async function history(rows) {
+    if (!rows) rows = await request(`${base}/${key}/versions?page=${page}&size=20`);
+    historyCount = rows.length;
+    $('history').replaceChildren();
+    rows.forEach(row => {
+      const item = document.createElement('div'); item.className = 'history-row' + (row.version === active ? ' active' : '');
+      const details = document.createElement('div'), title = document.createElement('strong'), meta = document.createElement('small');
+      title.textContent = `v${row.version}${row.version === active ? ' · Active' : ''}`;
+      meta.textContent = `${new Date(row.createdAt).toLocaleString()} · ${row.createdBy}`;
+      details.append(title, meta);
+      const button = document.createElement('button'); button.textContent = 'Load'; button.disabled = busy;
+      button.addEventListener('click', () => {
+        if (dirty() && !confirm('Discard your unsaved changes and load this version?')) return;
+        action(async () => { show(await request(`${base}/${key}/versions/${row.version}`)); message(`Loaded v${row.version}. Publishing is a separate action.`); });
+      });
+      item.append(details, button); $('history').append(item);
+    });
+  }
+  async function load() {
+    const [revision, rows] = await Promise.all([request(`${base}/${key}`), request(`${base}/${key}/versions?page=${page}&size=20`)]);
+    active = revision.version; show(revision);
+    $('title').textContent = $('template').selectedOptions[0].textContent;
+    $('placeholder').textContent = key === 'concept-picker' ? 'Required placeholder: {{MINIMUM_COMPATIBILITY_SCORE}}' : 'No template placeholders are supported for this prompt.';
+    await history(rows);
+  }
+  $('content').addEventListener('input', controls);
+  $('template').addEventListener('change', () => {
+    if (dirty() && !confirm('Discard unsaved changes and switch templates?')) { $('template').value = key; return; }
+    action(async () => {
+      const previousKey = key, previousPage = page; key = $('template').value; page = 0;
+      try { await load(); message(''); }
+      catch (error) { key = previousKey; page = previousPage; $('template').value = key; throw error; }
+    });
+  });
+  $('reload').addEventListener('click', () => {
+    if (dirty() && !confirm('Discard unsaved changes and reload the active version?')) return;
+    action(async () => { page = 0; await load(); message('Active version loaded.'); });
+  });
+  $('save').addEventListener('click', () => action(async () => {
+    show(await request(`${base}/${key}/versions`, { content: $('content').value, expectedActiveVersion: active }));
+    page = 0; await history(); message(`Draft v${version} saved. It is not active until you publish it.`);
+  }));
+  $('publish').addEventListener('click', () => {
+    if (!confirm(`Publish v${version}? New work will use this prompt. Existing jobs will keep their saved version.`)) return;
+    action(async () => {
+      const published = await request(`${base}/${key}/publish`, { version, expectedActiveVersion: active });
+      active = published.version; show(published); await history(); message(`v${active} published. New work on this server uses it immediately; connected servers receive a publication notification.`);
+    });
+  });
+  $('previous').addEventListener('click', () => action(async () => { page--; await history(); }));
+  $('next').addEventListener('click', () => action(async () => { page++; await history(); }));
+  window.addEventListener('beforeunload', event => { if (dirty()) { event.preventDefault(); event.returnValue = ''; } });
+  (async () => {
+    try {
+      const templates = await request(base);
+      templates.forEach(item => { const option = document.createElement('option'); option.value = item.key; option.textContent = item.label; $('template').append(option); });
+      key = $('template').value; await load(); busy = false; controls();
+    } catch (error) { message(error.message, true); }
+  })();
+})();
+</script>
+</body>
+</html>

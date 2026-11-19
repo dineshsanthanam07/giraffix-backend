@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.UUID;
 
 @RestController
+@io.swagger.v3.oas.annotations.tags.Tag(name="04 Products")
 @RequestMapping("/api/v1")
 public class ProductImageController {
     private final ProductImageService images;

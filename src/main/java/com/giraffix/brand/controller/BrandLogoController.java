@@ -19,6 +19,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.UUID;
 
 @RestController
+@io.swagger.v3.oas.annotations.tags.Tag(name="03 Brands")
 @RequestMapping("/api/v1/brands")
 public class BrandLogoController {
     private final BrandLogoService logos;

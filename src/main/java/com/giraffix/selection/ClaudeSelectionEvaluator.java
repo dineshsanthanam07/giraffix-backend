@@ -20,6 +20,8 @@ public class ClaudeSelectionEvaluator implements ConceptEvaluator {
     private final SelectionAssets assets;
     private final JsonNode schema;
     private final ClaudeConceptPicker picker;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setTemplates(com.giraffix.prompt.PromptTemplates templates){picker.setTemplates(templates);}
     public ClaudeSelectionEvaluator(RestClient.Builder builder, ClaudeProperties config, JsonSupport json, SelectionAssets assets) throws java.io.IOException {
         this.json=json;this.assets=assets;
         this.picker=new ClaudeConceptPicker(builder,config,json,assets);

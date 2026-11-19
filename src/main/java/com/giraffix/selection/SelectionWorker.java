@@ -28,7 +28,7 @@ public class SelectionWorker {
     public void run(UUID id){
         Request request=store.claim(id);if(request==null)return;
         final long claimedFence=request.fence();
-        try {
+        try (var scope=assets.openScope();var operation=org.slf4j.MDC.putCloseable("operationId",id.toString())) {
             // A previous process may have dispatched a call before dying. Never replay it blindly.
             if(count("SELECT COUNT(*) FROM selection_attempts WHERE request_id=? AND status IN ('STARTED','RECEIVED')",id)>0){store.finish(request,"PROVIDER_FAILED");return;}
             if(ConceptPickerRules.enabled(request.policy())){
@@ -202,7 +202,7 @@ public class SelectionWorker {
 
     private Evaluated call(Request request,String stage,List<Candidate> candidates,Evaluation exact){
         String inputHash=store.json.hash(List.of(request.context(),candidates,exact==null?"":exact,request.policy()));
-        var cached=store.db.query("SELECT result_json FROM selection_attempts WHERE request_id=? AND stage=? AND input_hash=? AND status='COMPLETED' ORDER BY created_at DESC",
+        var cached=store.db.query("SELECT result_json FROM selection_attempts WHERE request_id=? AND stage=? AND input_hash=? AND status='COMPLETED' ORDER BY created_at DESC LIMIT 1",
                 (r,n)->r.getString(1),request.id(),stage,inputHash);
         if(!cached.isEmpty()){
             var result=store.json.read(cached.get(0),Evaluated.class);
@@ -217,8 +217,8 @@ public class SelectionWorker {
             }
             UUID attempt=store.fenced(request,()->{
                 UUID attemptId=UUID.randomUUID();
-                store.db.update("INSERT INTO selection_attempts(id,request_id,stage,status,reserved_micros,input_hash,created_at) VALUES(?,?,?,'STARTED',?,?,?)",
-                        attemptId,request.id(),stage,latest.policy().maxAttemptCostMicros(),inputHash,stamp(Instant.now()));
+                store.db.update("INSERT INTO selection_attempts(id,request_id,stage,status,reserved_micros,input_hash,created_at,model_snapshot) VALUES(?,?,?,'STARTED',?,?,?,?)",
+                        attemptId,request.id(),stage,latest.policy().maxAttemptCostMicros(),inputHash,stamp(Instant.now()),request.policy().model());
                 store.db.update("UPDATE selection_requests SET spent_micros=spent_micros+?,verification_calls=verification_calls+?,status=? WHERE id=?",
                         latest.policy().maxAttemptCostMicros(),stage.equals("VERIFY")?1:0,stage.equals("VERIFY")?"VERIFYING":"SCREENING",request.id());
                 return attemptId;
@@ -248,6 +248,7 @@ public class SelectionWorker {
                     store.db.update("UPDATE selection_attempts SET status=CASE WHEN status IN ('RECEIVED','COMPLETED') THEN 'INVALID' ELSE 'FAILED_UNKNOWN_COST' END WHERE id=?",attempt);return null;
                 });
                 if(ex instanceof ResponseStatusException || ex instanceof ClaudeSelectionEvaluator.EnvelopeExceeded
+                        || ex instanceof org.springframework.web.client.ResourceAccessException
                         || store.get(request.id()).retries()>=request.policy().maxRetries()){
                     store.finish(request,ex instanceof ResponseStatusException response && response.getStatusCode()==HttpStatus.CONFLICT?"STALE_CONTEXT":"PROVIDER_FAILED");return null;
                 }
@@ -331,10 +332,14 @@ public class SelectionWorker {
             store.db.update("INSERT INTO concept_allocations(id,request_id,owner_id,product_id,concept_id,evaluation_id,state,created_at) VALUES(?,?,?,?,?,?,'RESERVED',?)",
                     allocation,request.id(),request.owner(),request.product(),candidate.conceptId(),evaluation,stamp(now));
             store.db.update("INSERT INTO concept_allocation_claims(owner_id,product_id,concept_id,allocation_id) VALUES(?,?,?,?)",request.owner(),request.product(),candidate.conceptId(),allocation);
-            store.db.update("INSERT INTO generation_jobs(id,allocation_id,brief_json,status,deadline,created_at) VALUES(?,?,?,'QUEUED',?,?)",
-                    job,allocation,store.json.write(new Brief(request.context(),candidate,value,request.policy(),
-                        new GenerationLimits(generationCost,reviewCost,generationDeadline,request.context().aspectRatio()==null?0:promptCost))),stamp(now.plusSeconds(generationDeadline)),stamp(now));
-            store.db.update("INSERT INTO outbox_events(id,job_id,created_at) VALUES(?,?,?)",UUID.randomUUID(),job,stamp(now));
+            // Normalize only the generation brief; preserve selection snapshots and idempotency hashes.
+            Context context = request.context();
+            Context generationContext = new Context(context.ownerId(), context.productId(), context.factsJson(),
+                    context.intent(), context.format(), context.controls(), context.images(),
+                    Objects.toString(context.aspectRatio(), "1:1"), context.brandLogo(), Objects.toString(context.quality(), "high"));
+            store.db.update("INSERT INTO generation_jobs(id,allocation_id,brief_json,status,deadline,created_at,director_prompt_version) VALUES(?,?,?,'QUEUED',?,?,?)",
+                    job,allocation,store.json.write(new Brief(generationContext,candidate,value,request.policy(),
+                        new GenerationLimits(generationCost,reviewCost,generationDeadline,promptCost))),stamp(now.plusSeconds(generationDeadline)),stamp(now),request.directorPromptVersion());
             store.db.update("UPDATE selection_requests SET status='SELECTED',selected_evaluation_id=?,fallback_used=?,lease_until=NULL WHERE id=?",evaluation,fallback,request.id());
             return true;
         });
@@ -347,12 +352,13 @@ public class SelectionWorker {
         if(ConceptPickerRules.enabled(request.policy()))args.add(request.product());
         if(request.manual()!=null)args.add(request.manual());args.add(request.manual()==null?request.policy().batchSize():1);
         return store.db.query("""
-            SELECT r.id FROM concept_revisions r
+            SELECT r.id,r.concept_id,r.revision,r.analysis_json,c.image_bucket,c.image_key,c.image_media_type
+            FROM concept_revisions r JOIN concepts c ON c.id=r.concept_id
             WHERE r.status='APPROVED'
             AND NOT EXISTS(SELECT 1 FROM concept_allocation_claims a WHERE a.owner_id=? AND a.product_id=? AND a.concept_id=r.concept_id)
             AND NOT EXISTS(SELECT 1 FROM selection_seen s WHERE s.request_id=? AND s.concept_id=r.concept_id)
             AND NOT EXISTS(SELECT 1 FROM concept_match_cache m WHERE m.owner_id=? AND m.context_hash=? AND m.policy_hash=? AND m.revision_id=r.id AND m.expires_at>?)
-            """+exclusions+manual+" ORDER BY RANDOM() LIMIT ?",(r,n)->r.getObject(1,UUID.class),args.toArray()).stream().map(this::candidate).filter(Objects::nonNull).toList();
+            """+exclusions+manual+" ORDER BY RANDOM() LIMIT ?",this::mapCandidate,args.toArray());
     }
     private String emptyOutcome(Request request){
         if(count("SELECT COUNT(*) FROM selection_seen WHERE request_id=?",request.id())>0)return "NO_MATCH_WITHIN_BUDGET";
@@ -365,7 +371,10 @@ public class SelectionWorker {
     }
     private Candidate candidate(UUID revision){
         return store.db.query("SELECT r.id,r.concept_id,r.revision,r.analysis_json,c.image_bucket,c.image_key,c.image_media_type FROM concept_revisions r JOIN concepts c ON c.id=r.concept_id WHERE r.id=? AND r.status='APPROVED'",
-                (r,n)->new Candidate(r.getObject(2,UUID.class),r.getObject(1,UUID.class),r.getInt(3),r.getString(4),new Asset(r.getString(5),r.getString(6),r.getString(7),null)),revision).stream().findFirst().orElse(null);
+                this::mapCandidate,revision).stream().findFirst().orElse(null);
+    }
+    private Candidate mapCandidate(java.sql.ResultSet r,int row) throws java.sql.SQLException {
+        return new Candidate(r.getObject(2,UUID.class),r.getObject(1,UUID.class),r.getInt(3),r.getString(4),new Asset(r.getString(5),r.getString(6),r.getString(7),null));
     }
     private Candidate withFingerprint(Candidate candidate){return new Candidate(candidate.conceptId(),candidate.revisionId(),candidate.revision(),candidate.analysisJson(),assets.fingerprint(candidate.reference()));}
     private void markSkipped(Request request,UUID screen){store.fenced(request,()->{store.db.update("UPDATE concept_evaluations SET verification_status='INELIGIBLE' WHERE id=?",screen);return null;});}

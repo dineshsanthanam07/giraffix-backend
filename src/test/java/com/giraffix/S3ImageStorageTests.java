@@ -105,6 +105,17 @@ class S3ImageStorageTests {
     }
 
     @Test
+    void durableCleanupCannotTargetAnotherBucketOrProduct() {
+        UUID product = UUID.randomUUID();
+        for (var object : List.of(
+                new S3ImageStorage.StoredObject("other-bucket", "products/" + product + "/photo.png"),
+                new S3ImageStorage.StoredObject("test-images", "products/" + UUID.randomUUID() + "/photo.png"))) {
+            assertThatThrownBy(() -> storage.deleteProductObject(product, object)).isInstanceOf(IllegalArgumentException.class);
+        }
+        verify(client, never()).deleteObject(any(DeleteObjectRequest.class));
+    }
+
+    @Test
     void logsDeleteFailureWithoutProviderSecrets(CapturedOutput output) {
         UUID id = UUID.randomUUID();
         String url = client.utilities().getUrl(GetUrlRequest.builder().bucket("test-images")

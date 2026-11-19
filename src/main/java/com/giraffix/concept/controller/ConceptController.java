@@ -13,10 +13,12 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.UUID;
 
 @RestController
+@io.swagger.v3.oas.annotations.tags.Tag(name="07 Concepts")
 @RequestMapping("/api/v1/concepts")
 public class ConceptController {
     private final ConceptService concepts;
-    public ConceptController(ConceptService concepts) { this.concepts = concepts; }
+    private final com.giraffix.usage.UsageService usage;
+    public ConceptController(ConceptService concepts,com.giraffix.usage.UsageService usage) { this.concepts = concepts;this.usage=usage; }
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @ResponseStatus(HttpStatus.CREATED)
@@ -26,7 +28,7 @@ public class ConceptController {
                     + "admin-role enforcement is deferred.")
     public ConceptResponse create(@AuthenticationPrincipal OidcUser user,
                                   @RequestPart("image") MultipartFile image) {
-        return concepts.create(user.getSubject(), image);
+        return usage.execute(user.getSubject(),com.giraffix.usage.UsageService.Kind.CONCEPT_ANALYSIS,()->concepts.create(user.getSubject(),image));
     }
 
     @GetMapping("/{id}")

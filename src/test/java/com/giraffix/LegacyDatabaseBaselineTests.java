@@ -30,12 +30,12 @@ class LegacyDatabaseBaselineTests {
 
         Flyway flyway = Flyway.configure().dataSource(url, "sa", "")
                 .baselineOnMigrate(true).baselineVersion("1").load();
-        assertThat(flyway.migrate().migrationsExecuted).isEqualTo(10);
+        assertThat(flyway.migrate().migrationsExecuted).isEqualTo(16);
         assertThat(flyway.info().all()).anySatisfy(migration -> {
             assertThat(migration.getType().name()).isEqualTo("BASELINE");
             assertThat(migration.getVersion().toString()).isEqualTo("1");
         });
-        assertThat(flyway.info().current().getVersion().toString()).isEqualTo("11");
+        assertThat(flyway.info().current().getVersion().toString()).isEqualTo("17");
 
         try (var connection = DriverManager.getConnection(url, "sa", "");
              var statement = connection.createStatement();

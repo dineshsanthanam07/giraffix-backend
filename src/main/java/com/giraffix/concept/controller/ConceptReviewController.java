@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.UUID;
 
 @RestController
+@io.swagger.v3.oas.annotations.tags.Tag(name="08 Admin - Concepts")
 @RequestMapping("/api/v1/concepts/{conceptId}/revisions")
 public class ConceptReviewController {
     private final ConceptLibrary library;

@@ -31,7 +31,7 @@ class RequestValidationTests {
         products = mock(ProductService.class);
         OidcUser user = mock(OidcUser.class);
         when(user.getSubject()).thenReturn("owner");
-        mvc = MockMvcBuilders.standaloneSetup(new BrandController(brands), new ProductController(products))
+        mvc = MockMvcBuilders.standaloneSetup(new BrandController(brands), new ProductController(products,mock(com.giraffix.usage.UsageService.class)))
                 .setCustomArgumentResolvers(new HandlerMethodArgumentResolver() {
                     public boolean supportsParameter(MethodParameter parameter) {
                         return parameter.getParameterType() == OidcUser.class;

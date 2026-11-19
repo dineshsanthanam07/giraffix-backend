@@ -22,13 +22,16 @@ import java.util.List;
 import java.util.UUID;
 
 @RestController
+@io.swagger.v3.oas.annotations.tags.Tag(name="04 Products")
 @RequestMapping("/api/v1")
 public class ProductController {
 
     private final ProductService productService;
+    private final com.giraffix.usage.UsageService usage;
 
-    public ProductController(ProductService productService) {
+    public ProductController(ProductService productService,com.giraffix.usage.UsageService usage) {
         this.productService = productService;
+        this.usage=usage;
     }
 
     @PostMapping(value = "/brands/{brandId}/products", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -46,10 +49,10 @@ public class ProductController {
     @GetMapping("/brands/{brandId}/products")
     public List<ProductResponse> getBrandProducts(
             @AuthenticationPrincipal OidcUser user,
-            @PathVariable UUID brandId) {
+            @PathVariable UUID brandId,@RequestParam(defaultValue="0") int page,@RequestParam(defaultValue="20") int size) {
 
         return productService.getBrandProducts(
-                user.getSubject(), brandId
+                user.getSubject(), brandId,page,size
         );
     }
 
@@ -99,6 +102,7 @@ public class ProductController {
                     content = @io.swagger.v3.oas.annotations.media.Content(mediaType = MediaType.MULTIPART_FORM_DATA_VALUE,
                             schema = @io.swagger.v3.oas.annotations.media.Schema(implementation = ProductAnalysisUpload.class))))
     public ProductAnalysisResponse analyze(
+            @AuthenticationPrincipal OidcUser user,
             @io.swagger.v3.oas.annotations.Parameter(hidden = true)
             @RequestParam(value = "images", required = false) List<MultipartFile> images,
             @io.swagger.v3.oas.annotations.Parameter(hidden = true) MultipartHttpServletRequest request) {
@@ -107,7 +111,8 @@ public class ProductController {
             throw new org.springframework.web.server.ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "Use either images or image, not both");
         }
-        return productService.analyzeProductImages(images != null ? images : legacyImages);
+        return usage.execute(user.getSubject(),com.giraffix.usage.UsageService.Kind.PRODUCT_ANALYSIS,
+                ()->productService.analyzeProductImages(images != null ? images : legacyImages));
     }
 
 }

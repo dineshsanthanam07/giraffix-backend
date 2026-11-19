@@ -22,6 +22,7 @@ import static org.assertj.core.api.Assertions.*;
         "spring.datasource.password=",
         "spring.datasource.driver-class-name=org.h2.Driver",
         "giraffix.ai.api-key=test-only",
+        "giraffix.api.legacy-selection-enabled=true",
         "spring.jpa.show-sql=false"
 })
 @Transactional
@@ -126,6 +127,21 @@ class GiraffixBackendApplicationTests {
         user.setGoogleId(subject);
         user.setEmail(subject + "@example.com");
         return users.saveAndFlush(user);
+    }
+
+    @Test void productAndBrandListsHaveBoundedStablePages(){
+        var owner=user("pagination-owner");
+        var brand=brands.createBrand(owner.getGoogleId(),new BrandRequest("One",null,null,null,null,null));
+        brands.createBrand(owner.getGoogleId(),new BrandRequest("Two",null,null,null,null,null));
+        assertThat(brands.getMyBrands(owner.getGoogleId(),0,1)).hasSize(1);
+        assertThat(brands.getMyBrands(owner.getGoogleId(),1,1)).hasSize(1);
+        products.createProduct(owner.getGoogleId(),brand.id(),new ProductRequest("First","Category",null,null,null,null));
+        products.createProduct(owner.getGoogleId(),brand.id(),new ProductRequest("Second","Category",null,null,null,null));
+        var first=products.getBrandProducts(owner.getGoogleId(),brand.id(),0,1);
+        var second=products.getBrandProducts(owner.getGoogleId(),brand.id(),1,1);
+        assertThat(first).hasSize(1);assertThat(second).hasSize(1);
+        assertThat(first.get(0).id()).isNotEqualTo(second.get(0).id());
+        assertThatThrownBy(()->products.getBrandProducts(owner.getGoogleId(),brand.id(),0,101)).isInstanceOf(ResponseStatusException.class);
     }
 
     private void assertNotFound(org.assertj.core.api.ThrowableAssert.ThrowingCallable action) {

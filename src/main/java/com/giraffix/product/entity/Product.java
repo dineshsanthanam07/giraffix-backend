@@ -45,6 +45,7 @@ public class Product {
     private String imageUrl;
 
     @OneToMany(mappedBy = "product", cascade = CascadeType.ALL, orphanRemoval = true)
+    @org.hibernate.annotations.BatchSize(size=50)
     @OrderBy("position ASC")
     private List<ProductImage> images = new ArrayList<>();
 

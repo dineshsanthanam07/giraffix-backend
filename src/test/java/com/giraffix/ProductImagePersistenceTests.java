@@ -51,7 +51,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.url=jdbc:h2:mem:giraffix;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
         "spring.datasource.username=sa", "spring.datasource.password=",
         "spring.datasource.driver-class-name=org.h2.Driver", "giraffix.ai.api-key=test-only",
-        "spring.jpa.show-sql=false", "giraffix.storage.s3.bucket=test-product-images"
+        "spring.jpa.show-sql=false", "giraffix.storage.s3.bucket=test-product-images",
+        "giraffix.storage.cleanup.worker-enabled=false"
 })
 @Transactional
 class ProductImagePersistenceTests {
@@ -62,6 +63,7 @@ class ProductImagePersistenceTests {
     @Autowired BrandService brands;
     @Autowired EntityManager entityManager;
     @Autowired JdbcTemplate jdbc;
+    @Autowired com.giraffix.product.service.ProductImageDeletionQueue deletions;
     @MockitoBean S3Client s3;
     private final java.util.Map<String, byte[]> uploaded = new java.util.HashMap<>();
     private MockMvc mvc;
@@ -164,6 +166,31 @@ class ProductImagePersistenceTests {
         assertThat(productRepository.count()).isEqualTo(before);
     }
 
+    @Test void partialUploadRollbackCleansEarlierObjects() throws Exception {
+        var calls=new java.util.concurrent.atomic.AtomicInteger();
+        when(s3.putObject(any(PutObjectRequest.class),any(RequestBody.class))).thenAnswer(call->{
+            PutObjectRequest request=call.getArgument(0);RequestBody body=call.getArgument(1);
+            try(var input=body.contentStreamProvider().newStream()){uploaded.put(request.key(),input.readAllBytes());}
+            if(calls.incrementAndGet()==2)throw S3Exception.builder().statusCode(503).build();
+            return PutObjectResponse.builder().build();
+        });
+        assertThatThrownBy(()->images.createWithImages(owner,brandId,details,List.of(file("png"),file("jpeg"))))
+                .isInstanceOf(ResponseStatusException.class);
+        TestTransaction.flagForRollback();TestTransaction.end();
+        assertThat(uploaded).isEmpty();
+    }
+
+    @Test void commitTimeFailureCleansUploadedObjects() throws Exception {
+        var saved=images.createWithImages(owner,brandId,details,List.of(file("png")));
+        org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization(){
+                    @Override public void beforeCommit(boolean readOnly){throw new IllegalStateException("Simulated commit failure");}
+                });
+        TestTransaction.flagForCommit();
+        assertThatThrownBy(TestTransaction::end).isInstanceOf(IllegalStateException.class);
+        assertThat(uploaded).isEmpty();assertThat(productRepository.existsById(saved.id())).isFalse();
+    }
+
     @Test
     void imageCountLimitIncludesPreviouslySavedImages() throws Exception {
         var saved = images.createWithImages(owner, brandId, details, java.util.Collections.nCopies(5, file("png")));
@@ -174,18 +201,26 @@ class ProductImagePersistenceTests {
     }
 
     @Test
-    void deletingAProductRemovesItsImageRowsAndS3Objects() throws Exception {
+    void deletionCommitsBeforeAnyS3Cleanup() throws Exception {
         var saved = images.createWithImages(owner, brandId, details, List.of(file("png"), file("jpeg")));
         products.deleteProduct(owner, saved.id());
         entityManager.flush();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM product_images WHERE product_id = ?", Long.class, saved.id())).isZero();
         assertThat(productRepository.existsById(saved.id())).isFalse();
+        assertThat(pendingDeletions(saved.id())).isEqualTo(2);
+        assertThat(uploaded).hasSize(2);
+        verify(s3, never()).deleteObject(any(DeleteObjectRequest.class));
+        TestTransaction.flagForCommit();
+        TestTransaction.end();
+        deletions.processPending();
         assertThat(uploaded).isEmpty();
+        assertThat(pendingDeletions(saved.id())).isZero();
         verify(s3, times(2)).deleteObject(any(DeleteObjectRequest.class));
+        cleanCommittedOwner();
     }
 
     @Test
-    void partialS3DeletionFailureRetainsProductAndAllowsRetry() throws Exception {
+    void partialS3FailureKeepsDurableWorkAndRetriesWithoutRestoringProduct() throws Exception {
         var saved = images.createWithImages(owner, brandId, details, List.of(file("png"), file("jpeg")));
         // Commit the fixture so rollback can be checked outside the failed transaction.
         TestTransaction.flagForCommit();
@@ -200,19 +235,114 @@ class ProductImagePersistenceTests {
             uploaded.remove(request.key());
             return DeleteObjectResponse.builder().build();
         });
-        assertThatThrownBy(() -> products.deleteProduct(owner, saved.id()))
-                .isInstanceOfSatisfying(ResponseStatusException.class,
-                        ex -> assertThat(ex.getStatusCode()).isEqualTo(HttpStatus.BAD_GATEWAY));
-        assertThat(productRepository.existsById(saved.id())).isTrue();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM product_images WHERE product_id = ?", Long.class, saved.id())).isEqualTo(2);
-        assertThat(uploaded).hasSize(1);
         products.deleteProduct(owner, saved.id());
         assertThat(productRepository.existsById(saved.id())).isFalse();
+        assertThat(uploaded).hasSize(2);
+        assertThat(pendingDeletions(saved.id())).isEqualTo(2);
+        deletions.processPending();
+        assertThat(uploaded).hasSize(1);
+        assertThat(pendingDeletions(saved.id())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT attempts FROM product_image_deletions WHERE product_id=?", Integer.class, saved.id())).isEqualTo(1);
+        deletions.processPending(); // Backoff prevents a tight retry loop.
+        verify(s3, times(2)).deleteObject(any(DeleteObjectRequest.class));
+        jdbc.update("UPDATE product_image_deletions SET next_attempt_at=CURRENT_TIMESTAMP WHERE product_id=?", saved.id());
+        deletions.processPending();
         assertThat(uploaded).isEmpty();
-        TestTransaction.start();
-        jdbc.update("DELETE FROM brands WHERE id = ?", brandId);
-        jdbc.update("DELETE FROM users WHERE google_id = ?", owner);
+        assertThat(pendingDeletions(saved.id())).isZero();
+        verify(s3, times(3)).deleteObject(any(DeleteObjectRequest.class));
+        cleanCommittedOwner();
+    }
+
+    @Test
+    void deletionCommitFailurePreservesProductPhotosAndDoesNotPublishCleanup() throws Exception {
+        var saved = images.createWithImages(owner, brandId, details, List.of(file("png")));
         TestTransaction.flagForCommit();
+        TestTransaction.end();
+        TestTransaction.start();
+        products.deleteProduct(owner, saved.id());
+        org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization() {
+                    @Override public void beforeCommit(boolean readOnly) { throw new IllegalStateException("Commit failed"); }
+                });
+        TestTransaction.flagForCommit();
+        assertThatThrownBy(TestTransaction::end).isInstanceOf(IllegalStateException.class);
+        assertThat(productRepository.existsById(saved.id())).isTrue();
+        assertThat(pendingDeletions(saved.id())).isZero();
+        deletions.processPending();
+        verify(s3, never()).deleteObject(any(DeleteObjectRequest.class));
+        assertThat(uploaded).hasSize(1);
+        products.deleteProduct(owner, saved.id());
+        deletions.processPending();
+        cleanCommittedOwner();
+    }
+
+    @Test
+    void expiredCleanupLeaseReplaysAnAlreadyRemovedObjectSafely() throws Exception {
+        var saved = images.createWithImages(owner, brandId, details, List.of(file("png")));
+        products.deleteProduct(owner, saved.id());
+        TestTransaction.flagForCommit();
+        TestTransaction.end();
+        // Simulate remote success followed by process death before the queue acknowledgment.
+        uploaded.clear();
+        jdbc.update("UPDATE product_image_deletions SET lease_token=?,lease_until=?,attempts=1 WHERE product_id=?",
+                UUID.randomUUID(), java.sql.Timestamp.from(java.time.Instant.now().plusSeconds(120)), saved.id());
+        deletions.processPending();
+        verify(s3, never()).deleteObject(any(DeleteObjectRequest.class));
+        jdbc.update("UPDATE product_image_deletions SET lease_until=? WHERE product_id=?",
+                java.sql.Timestamp.from(java.time.Instant.now().minusSeconds(1)), saved.id());
+        deletions.processPending();
+        assertThat(pendingDeletions(saved.id())).isZero();
+        verify(s3).deleteObject(any(DeleteObjectRequest.class));
+        cleanCommittedOwner();
+    }
+
+    @Test
+    void competingWorkersCannotDeleteTheSameClaimAndStorageRunsOutsideTransactions() throws Exception {
+        var saved = images.createWithImages(owner, brandId, details, List.of(file("png")));
+        products.deleteProduct(owner, saved.id());
+        TestTransaction.flagForCommit();
+        TestTransaction.end();
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        when(s3.deleteObject(any(DeleteObjectRequest.class))).thenAnswer(call -> {
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            entered.countDown();
+            assertThat(release.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            uploaded.remove(((DeleteObjectRequest) call.getArgument(0)).key());
+            return DeleteObjectResponse.builder().build();
+        });
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            var first = executor.submit(deletions::processPending);
+            assertThat(entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            deletions.processPending();
+            verify(s3, times(1)).deleteObject(any(DeleteObjectRequest.class));
+            release.countDown();
+            first.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(pendingDeletions(saved.id())).isZero();
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+        cleanCommittedOwner();
+    }
+
+    @Test
+    void deletingAProductWithOnlyALegacyExternalUrlQueuesNoStorageDeletion() {
+        var saved = products.createProduct(owner, brandId,
+                new ProductRequest("Bottle", "Drinkware", null, null, null, "https://example.com/photo.png"));
+        products.deleteProduct(owner, saved.id());
+        assertThat(pendingDeletions(saved.id())).isZero();
+        verify(s3, never()).deleteObject(any(DeleteObjectRequest.class));
+    }
+
+    private int pendingDeletions(UUID productId) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM product_image_deletions WHERE product_id=?", Integer.class, productId);
+    }
+
+    private void cleanCommittedOwner() {
+        jdbc.update("DELETE FROM brands WHERE id=?", brandId);
+        jdbc.update("DELETE FROM users WHERE google_id=?", owner);
     }
 
     @Test
